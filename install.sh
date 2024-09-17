@@ -92,30 +92,30 @@ echo "$PASSWORD" | sudo saslpasswd2 -c "$USERNAME" -p
 sudo chown postfix:postfix /etc/sasldb2
 sudo chmod 660 /etc/sasldb2
 
-# Create custom bounce template with proper variable escaping
-sudo bash -c 'cat > /etc/postfix/bounce_templates << "EOF"
+# Create custom bounce template with proper variable handling
+sudo tee /etc/postfix/bounce_templates > /dev/null <<'EOF'
 # Custom bounce message with recipient in subject
 
 bounce_notice_template = <<END
-Subject: Undelivered Mail Returned to Sender (Recipient: \${recipient})
+Subject: Undelivered Mail Returned to Sender (Recipient: ${recipient})
 
-This is the mail system at host \${hostname}.
+This is the mail system at host ${hostname}.
 
 I'm sorry to have to inform you that your message could not
 be delivered to one or more recipients. It's attached below.
 
-\${if >{\${server_notify_recipient}}{0}}
+${if >{${server_notify_recipient}}{0}}
 For further assistance, please send mail to postmaster.
 
 If you do so, please include this problem report. You can
 delete your own text from the attached returned message.
-\${endif}
+${endif}
 
                         The mail system
 
-\${failure_notice_recipient}
+${failure_notice_recipient}
 END
-EOF'
+EOF
 
 # Set permissions for the bounce template file
 sudo chown root:root /etc/postfix/bounce_templates
