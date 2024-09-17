@@ -83,6 +83,35 @@ tls_certificate = /etc/exim4/ssl/exim.crt
 tls_privatekey = /etc/exim4/ssl/exim.key
 EOF
 
+# Modify ACLs to allow authenticated relay
+sudo bash -c 'cat > /etc/exim4/conf.d/acl/30_exim4-config_check_rcpt' <<'EOF'
+acl_check_rcpt:
+
+  # Allow mail to local domains
+  accept  domains = +local_domains
+          endpass
+          message = Unknown user
+          verify = recipient
+
+  # Allow relay for authenticated senders
+  accept  authenticated = *
+
+  # Deny relay attempts
+  deny    message = relay not permitted
+
+  # Accept mail to domains we relay for
+  accept  domains = +relay_to_domains
+          endpass
+          verify = recipient
+
+  # Deny invalid recipients
+  deny    message = Unknown recipient
+          verify = recipient
+
+  # Default deny
+  deny
+EOF
+
 # Update Exim configuration
 sudo update-exim4.conf
 
