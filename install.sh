@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # This script installs and configures Postfix as an SMTP server with authentication on port 587.
-# It sets up SMTP authentication for use with Nodemailer.
+# It also modifies the bounce message template to include the recipient's email in the subject.
 
 # Prompt for hostname
 read -p "Enter the hostname (e.g., mail.example.com): " HOSTNAME
@@ -51,6 +51,16 @@ sudo postconf -e "smtpd_tls_auth_only = no"
 sudo postconf -e "smtpd_sasl_type = cyrus"
 sudo postconf -e "smtpd_sasl_path = smtpd"
 
+# Remove any sending limits
+sudo postconf -e "smtpd_client_connection_rate_limit = 0"
+sudo postconf -e "smtpd_client_message_rate_limit = 0"
+sudo postconf -e "smtpd_client_connection_count_limit = 0"
+sudo postconf -e "smtpd_recipient_limit = 0"
+sudo postconf -e "anvil_rate_time_unit = 60s"
+
+# Configure Postfix to use custom bounce template
+sudo postconf -e "bounce_template_file = /etc/postfix/bounce_templates"
+
 # Configure Postfix to listen on port 587
 sudo sed -i '/^#submission inet n - n - - smtpd$/s/^#//' /etc/postfix/master.cf
 
@@ -81,6 +91,35 @@ sudo adduser postfix sasl
 echo "$PASSWORD" | sudo saslpasswd2 -c "$USERNAME" -p
 sudo chown postfix:postfix /etc/sasldb2
 sudo chmod 660 /etc/sasldb2
+
+# Create custom bounce template
+sudo bash -c 'cat > /etc/postfix/bounce_templates' <<'EOF'
+# Custom bounce message with recipient in subject
+
+bounce_notice_template = <<END
+Subject: Undelivered Mail Returned to Sender (Recipient: ${recipient})
+
+This is the mail system at host ${hostname}.
+
+I'm sorry to have to inform you that your message could not
+be delivered to one or more recipients. It's attached below.
+
+${if >{${server_notify_recipient}}{0}}
+For further assistance, please send mail to postmaster.
+
+If you do so, please include this problem report. You can
+delete your own text from the attached returned message.
+${endif}
+
+                        The mail system
+
+${failure_notice_recipient}
+END
+EOF
+
+# Set permissions for the bounce template file
+sudo chown root:root /etc/postfix/bounce_templates
+sudo chmod 644 /etc/postfix/bounce_templates
 
 # Restart services
 sudo service saslauthd restart
