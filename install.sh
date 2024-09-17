@@ -51,8 +51,12 @@ sudo sed -i "s/dc_relay_nets='.*'/dc_relay_nets=''/g" /etc/exim4/update-exim4.co
 sudo sed -i "s/dc_smarthost='.*'/dc_smarthost=''/g" /etc/exim4/update-exim4.conf.conf
 sudo sed -i "s/CFILEMODE='.*'/CFILEMODE='644'/g" /etc/exim4/update-exim4.conf.conf
 
+# Set Exim to listen on ports 25 and 587
+sudo sed -i '/^SMTPLISTENEROPTIONS/d' /etc/default/exim4
+echo 'SMTPLISTENEROPTIONS="-oX 25:587"' | sudo tee -a /etc/default/exim4
+
 # Enable TLS
-sudo mkdir /etc/exim4/ssl
+sudo mkdir -p /etc/exim4/ssl
 sudo openssl req -new -x509 -days 3650 -nodes -out /etc/exim4/ssl/exim.crt -keyout /etc/exim4/ssl/exim.key -subj "/CN=$HOSTNAME"
 sudo chmod 600 /etc/exim4/ssl/exim.key
 sudo chown root:Debian-exim /etc/exim4/ssl/exim.key
@@ -65,21 +69,16 @@ sudo chown root:Debian-exim /etc/exim4/passwd
 sudo chmod 640 /etc/exim4/passwd
 
 # Configure Exim authentication
-sudo bash -c 'cat > /etc/exim4/conf.d/auth/00_exim4-config-auth' <<EOF
+sudo bash -c 'cat > /etc/exim4/conf.d/auth/00_exim4-config-auth' <<'EOF'
 plain_login:
   driver = plaintext
   public_name = LOGIN
-  server_prompts = "Username:: : Password::"
-  server_condition = "${if crypteq{$auth2}{${lookup{$auth1}lsearch{/etc/exim4/passwd}{$value}{*}}}{yes}{no}}"
+  server_condition = "${if eq{$auth2}{${lookup{$auth1}lsearch{/etc/exim4/passwd}{$value}{*}}}{yes}{no}}"
   server_set_id = $auth1
 EOF
 
-# Configure Exim to listen on port 587
-sudo sed -i '/daemon_smtp_ports = /d' /etc/exim4/exim4.conf.template
-echo "daemon_smtp_ports = 25 : 587" | sudo tee -a /etc/exim4/exim4.conf.template
-
 # Enable TLS in Exim
-sudo bash -c 'cat > /etc/exim4/conf.d/main/03_exim4-config_tlsoptions' <<EOF
+sudo bash -c 'cat > /etc/exim4/conf.d/main/03_exim4-config_tlsoptions' <<'EOF'
 tls_certificate = /etc/exim4/ssl/exim.crt
 tls_privatekey = /etc/exim4/ssl/exim.key
 EOF
