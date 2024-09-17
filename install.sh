@@ -9,9 +9,19 @@ read -p "Enter the hostname (e.g., mail.example.com): " HOSTNAME
 # Prompt for username
 read -p "Enter the username for SMTP authentication: " USERNAME
 
-# Prompt for password
-read -sp "Enter the password for SMTP authentication: " PASSWORD
-echo
+# Prompt for password with confirmation
+while true; do
+    read -s -p "Enter the password for SMTP authentication: " PASSWORD1
+    echo
+    read -s -p "Confirm the password: " PASSWORD2
+    echo
+    if [ "$PASSWORD1" = "$PASSWORD2" ]; then
+        PASSWORD="$PASSWORD1"
+        break
+    else
+        echo "Passwords do not match. Please try again."
+    fi
+done
 
 # Update system packages
 sudo apt-get update
@@ -40,10 +50,22 @@ sudo postconf -e "smtp_tls_note_starttls_offer = yes"
 sudo postconf -e "smtpd_tls_auth_only = no"
 sudo postconf -e "smtpd_sasl_type = cyrus"
 sudo postconf -e "smtpd_sasl_path = smtpd"
+sudo postconf -e "smtpd_sasl_authenticated_header = yes"
 
 # Configure Postfix to listen on port 587
 sudo sed -i '/^#submission inet n - n - - smtpd$/s/^#//' /etc/postfix/master.cf
-sudo sed -i '/^submission.*smtpd$/a \  -o syslog_name=postfix/submission\n  -o smtpd_tls_security_level=encrypt\n  -o smtpd_sasl_auth_enable=yes\n  -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject\n  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject\n  -o milter_macro_daemon_name=ORIGINATING' /etc/postfix/master.cf
+
+# Remove any existing submission configurations to prevent duplication
+sudo sed -i '/^submission inet n.*smtpd$/,/^$/d' /etc/postfix/master.cf
+
+# Add the submission configuration
+echo "submission inet n       -       n       -       -       smtpd
+  -o syslog_name=postfix/submission
+  -o smtpd_tls_security_level=encrypt
+  -o smtpd_sasl_auth_enable=yes
+  -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
+  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+  -o milter_macro_daemon_name=ORIGINATING" | sudo tee -a /etc/postfix/master.cf
 
 # Enable and configure Cyrus SASL
 sudo sed -i 's/^START=no/START=yes/' /etc/default/saslauthd
@@ -59,6 +81,7 @@ sudo adduser postfix sasl
 # Create the user in sasldb2
 echo "$PASSWORD" | sudo saslpasswd2 -c "$USERNAME" -p
 sudo chown postfix:postfix /etc/sasldb2
+sudo chmod 660 /etc/sasldb2
 
 # Restart services
 sudo service saslauthd restart
@@ -67,14 +90,18 @@ sudo service postfix restart
 # Open port 587 in firewall
 sudo ufw allow 587
 
+# Display the SMTP credentials
+echo
 echo "Postfix has been installed and configured."
-echo "You can now use the following SMTP details in Nodemailer:"
+echo
+echo "SMTP Credentials:"
 echo "Host: $HOSTNAME"
 echo "Port: 587"
 echo "Username: $USERNAME"
-echo "Password: [The password you entered]"
-
+echo "Password: $PASSWORD"
+echo
+echo "You can now use these SMTP details in Nodemailer."
+echo
 echo "Note: Adding a custom header to bounced emails requires additional configuration."
 echo "You may need to set up a content filter or use Postfix's bounce templates."
 echo "Please refer to Postfix documentation for more details."
-
