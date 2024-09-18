@@ -3,8 +3,40 @@
 # This script installs and configures Postfix as an SMTP server with authentication on port 587.
 # It sets up SMTP authentication for use with Nodemailer.
 
-# Prompt for hostname
-read -p "Enter the hostname (e.g., mail.example.com): " HOSTNAME
+# Install necessary tools
+sudo apt-get install -y dnsutils curl
+
+# Function to get the server's public IP
+get_public_ip() {
+    PUBLIC_IP=$(curl -s ifconfig.me)
+    if [ -z "$PUBLIC_IP" ]; then
+        echo "Could not retrieve public IP address."
+        exit 1
+    fi
+}
+
+# Function to get reverse DNS of the public IP
+get_rdns() {
+    RDNS=$(dig -x "$PUBLIC_IP" +short | sed 's/\.$//')
+    if [ -z "$RDNS" ]; then
+        echo "Could not retrieve reverse DNS of the public IP."
+        exit 1
+    fi
+}
+
+# Get public IP and reverse DNS
+get_public_ip
+get_rdns
+
+# Prompt for hostname and check against RDNS
+while true; do
+    read -p "Enter the hostname (e.g., $RDNS): " HOSTNAME
+    if [ "$HOSTNAME" = "$RDNS" ]; then
+        break
+    else
+        echo "The entered hostname does not match the reverse DNS of the server's public IP ($RDNS). Please enter a hostname that matches the reverse DNS."
+    fi
+done
 
 # Prompt for username
 read -p "Enter the username for SMTP authentication: " USERNAME
@@ -81,10 +113,6 @@ sudo adduser postfix sasl
 echo "$PASSWORD" | sudo saslpasswd2 -c "$USERNAME" -p
 sudo chown postfix:postfix /etc/sasldb2
 sudo chmod 660 /etc/sasldb2
-
-# Enable services to start on boot
-sudo systemctl enable postfix
-sudo systemctl enable saslauthd
 
 # Restart services
 sudo service saslauthd restart
