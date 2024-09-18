@@ -82,6 +82,10 @@ echo "$PASSWORD" | sudo saslpasswd2 -c "$USERNAME" -p
 sudo chown postfix:postfix /etc/sasldb2
 sudo chmod 660 /etc/sasldb2
 
+# Enable services to start on boot
+sudo systemctl enable postfix
+sudo systemctl enable saslauthd
+
 # Restart services
 sudo service saslauthd restart
 sudo service postfix restart
