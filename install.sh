@@ -28,9 +28,10 @@ get_rdns() {
 get_public_ip
 get_rdns
 
-# Prompt for hostname and check against RDNS
+# Prompt for hostname with auto-fill from RDNS and allow editing
 while true; do
-    read -p "Enter the hostname (e.g., $RDNS): " HOSTNAME
+    read -e -p "Enter the hostname [${RDNS}]: " HOSTNAME
+    HOSTNAME=${HOSTNAME:-$RDNS}
     if [ "$HOSTNAME" = "$RDNS" ]; then
         break
     else
@@ -38,14 +39,44 @@ while true; do
     fi
 done
 
+# Prompt for SMTP address preference
+while true; do
+    read -p "Set smtp_address_preference (ipv6, ipv4, any) [any]: " SMTP_PREF
+    SMTP_PREF=${SMTP_PREF:-any}
+    case "$SMTP_PREF" in
+        ipv6|ipv4|any)
+            break
+            ;;
+        *)
+            echo "Invalid option. Please enter 'ipv6', 'ipv4', or 'any'."
+            ;;
+    esac
+done
+
+# Prompt for removing Received header
+while true; do
+    read -p "Do you want to remove the 'Received' header from outgoing emails? (yes/no) [no]: " REMOVE_HEADER
+    REMOVE_HEADER=${REMOVE_HEADER,,} # Convert to lowercase
+    REMOVE_HEADER=${REMOVE_HEADER:-no}
+    case "$REMOVE_HEADER" in
+        yes|no)
+            break
+            ;;
+        *)
+            echo "Please answer yes or no."
+            ;;
+    esac
+done
+
 # Prompt for username
 read -p "Enter the username for SMTP authentication: " USERNAME
 
-# Prompt for password with confirmation
+# Prompt for password with confirmation (Visible Input)
 while true; do
-    read -s -p "Enter the password for SMTP authentication: " PASSWORD1
+    # Removed the '-s' option to make password input visible
+    read -p "Enter the password for SMTP authentication: " PASSWORD1
     echo
-    read -s -p "Confirm the password: " PASSWORD2
+    read -p "Confirm the password: " PASSWORD2
     echo
     if [ "$PASSWORD1" = "$PASSWORD2" ]; then
         PASSWORD="$PASSWORD1"
@@ -83,9 +114,10 @@ sudo postconf -e "smtpd_tls_auth_only = no"
 sudo postconf -e "smtpd_sasl_type = cyrus"
 sudo postconf -e "smtpd_sasl_path = smtpd"
 
-# Configure Postfix to listen on port 587
-sudo sed -i '/^#submission inet n - n - - smtpd$/s/^#//' /etc/postfix/master.cf
+# Set smtp_address_preference
+sudo postconf -e "smtp_address_preference = $SMTP_PREF"
 
+# Configure Postfix to listen on port 587
 # Remove any existing submission configurations to prevent duplication
 sudo sed -i '/^submission inet n.*smtpd$/,/^$/d' /etc/postfix/master.cf
 
@@ -113,6 +145,17 @@ sudo adduser postfix sasl
 echo "$PASSWORD" | sudo saslpasswd2 -c "$USERNAME" -p
 sudo chown postfix:postfix /etc/sasldb2
 sudo chmod 660 /etc/sasldb2
+
+# Configure Received header removal if user opted in
+if [ "$REMOVE_HEADER" = "yes" ]; then
+    echo "Setting up to remove 'Received' headers from outgoing emails..."
+    sudo postconf -e "header_checks = regexp:/etc/postfix/header_checks"
+    echo "/^Received:/     IGNORE" | sudo tee /etc/postfix/header_checks
+else
+    # Ensure header_checks is not set if user chooses not to remove headers
+    sudo postconf -e "header_checks ="
+    sudo rm -f /etc/postfix/header_checks
+fi
 
 # Enable services to start on boot
 sudo systemctl enable saslauthd
