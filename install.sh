@@ -42,7 +42,7 @@ done
 # Prompt for SMTP address preference
 while true; do
     read -p "Set smtp_address_preference (ipv6, ipv4, any) [ipv4]: " SMTP_PREF
-    SMTP_PREF=${SMTP_PREF:-any}
+    SMTP_PREF=${SMTP_PREF:-ipv4}
     case "$SMTP_PREF" in
         ipv6|ipv4|any)
             break
