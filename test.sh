@@ -22,26 +22,49 @@ get_public_ip() {
 # Function to get reverse DNS of the public IP
 get_rdns() {
     RDNS=$(dig -x "$PUBLIC_IP" +short | sed 's/\.$//')
-    if [ -z "$RDNS" ]; then
-        echo "Could not retrieve reverse DNS of the public IP."
-        exit 1
-    fi
 }
 
 # Get public IP and reverse DNS
 get_public_ip
 get_rdns
 
-# Prompt for hostname with auto-fill from RDNS and allow editing
-while true; do
-    read -e -p "Enter the hostname [${RDNS}]: " HOSTNAME
-    HOSTNAME=${HOSTNAME:-$RDNS}
-    if [ "$HOSTNAME" = "$RDNS" ]; then
-        break
-    else
-        echo "The entered hostname does not match the reverse DNS of the server's public IP ($RDNS). Please enter a hostname that matches the reverse DNS."
-    fi
-done
+# Prompt for hostname
+if [ -n "$RDNS" ]; then
+    # If RDNS is found, use it as the default and enforce matching if the user chooses to use the default
+    while true; do
+        read -e -p "Enter the hostname [${RDNS}]: " HOSTNAME
+        HOSTNAME=${HOSTNAME:-$RDNS}
+        if [ "$HOSTNAME" = "$RDNS" ]; then
+            break
+        else
+            # Optional: Allow the user to proceed with a different hostname
+            read -p "The entered hostname does not match the reverse DNS of the server's public IP ($RDNS). Do you want to proceed with this hostname? (yes/no) [no]: " PROCEED
+            PROCEED=${PROCEED,,} # Convert to lowercase
+            PROCEED=${PROCEED:-no}
+            case "$PROCEED" in
+                yes)
+                    break
+                    ;;
+                no)
+                    echo "Please enter a hostname that matches the reverse DNS or choose to proceed without matching."
+                    ;;
+                *)
+                    echo "Please answer yes or no."
+                    ;;
+            esac
+        fi
+    done
+else
+    # If RDNS is not found, prompt the user to input the hostname manually without any default
+    while true; do
+        read -p "Reverse DNS not found. Please enter the hostname manually: " HOSTNAME
+        if [[ "$HOSTNAME" =~ ^[a-zA-Z0-9.-]+$ ]]; then
+            break
+        else
+            echo "Invalid hostname format. Please enter a valid fully qualified domain name (e.g., mail.yourdomain.com)."
+        fi
+    done
+fi
 
 # Prompt for SMTP address preference
 while true; do
@@ -75,12 +98,11 @@ done
 # Prompt for username
 read -p "Enter the username for SMTP authentication: " USERNAME
 
-# Prompt for password with confirmation (Visible Input)
+# Prompt for password with confirmation (Hidden Input for Security)
 while true; do
-    # Removed the '-s' option to make password input visible
-    read -p "Enter the password for SMTP authentication: " PASSWORD1
+    read -s -p "Enter the password for SMTP authentication: " PASSWORD1
     echo
-    read -p "Confirm the password: " PASSWORD2
+    read -s -p "Confirm the password: " PASSWORD2
     echo
     if [ "$PASSWORD1" = "$PASSWORD2" ]; then
         PASSWORD="$PASSWORD1"
