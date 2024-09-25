@@ -3,26 +3,39 @@
 # This script installs and configures Postfix as an SMTP server with authentication on port 587.
 # It sets up SMTP authentication for use with Nodemailer and integrates amavisd-new for spam and virus filtering.
 
-# Exit immediately if a command exits with a non-zero status
+# Exit immediately if a command exits with a non-zero status, except in specific cases
 set -e
 
+# Function to handle non-critical command failures
+safe_run() {
+    "$@" || true
+}
+
 # Install necessary tools
+echo "Installing necessary tools..."
 sudo apt-get update
 sudo apt-get install -y dnsutils curl
 
 # Function to get the server's public IP
 get_public_ip() {
-    PUBLIC_IP=$(curl -s ifconfig.me)
+    echo "Retrieving public IP address..."
+    PUBLIC_IP=$(safe_run curl -s ifconfig.me)
     if [ -z "$PUBLIC_IP" ]; then
         echo "Could not retrieve public IP address."
         exit 1
     fi
+    echo "Public IP: $PUBLIC_IP"
 }
 
 # Function to get reverse DNS of the public IP
 get_rdns() {
-    RDNS=$(dig -x "$PUBLIC_IP" +short | sed 's/\.$//')
-    # Removed the exit to allow manual input if rDNS is not found
+    echo "Retrieving reverse DNS for IP: $PUBLIC_IP..."
+    RDNS=$(safe_run dig -x "$PUBLIC_IP" +short | sed 's/\.$//')
+    if [ -n "$RDNS" ]; then
+        echo "Reverse DNS found: $RDNS"
+    else
+        echo "Reverse DNS not found."
+    fi
 }
 
 # Get public IP and reverse DNS
@@ -60,7 +73,7 @@ else
     while true; do
         read -p "Reverse DNS not found. Please enter the hostname manually (e.g., mail.yourdomain.com): " HOSTNAME
         if [[ "$HOSTNAME" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-            # Optional: Validate that the hostname is fully qualified (ends with a dot or has at least one dot)
+            # Optional: Validate that the hostname is fully qualified (has at least one dot)
             if [[ "$HOSTNAME" =~ \. ]]; then
                 break
             else
@@ -119,12 +132,15 @@ while true; do
 done
 
 # Install Postfix and necessary packages
+echo "Installing Postfix and related packages..."
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix sasl2-bin libsasl2-modules
 
 # Stop postfix service during configuration
+echo "Stopping Postfix service for configuration..."
 sudo systemctl stop postfix
 
 # Configure postfix main.cf
+echo "Configuring Postfix..."
 sudo postconf -e "smtpd_banner = \$myhostname ESMTP"
 sudo postconf -e "myhostname = $HOSTNAME"
 sudo postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost"
@@ -147,6 +163,7 @@ sudo postconf -e "smtpd_sasl_path = smtpd"
 sudo postconf -e "smtp_address_preference = $SMTP_PREF"
 
 # Configure Postfix to listen on port 587
+echo "Configuring Postfix to listen on port 587..."
 # Remove any existing submission configurations to prevent duplication
 sudo sed -i '/^submission inet n.*smtpd$/,/^$/d' /etc/postfix/master.cf
 
@@ -160,6 +177,7 @@ echo "submission inet n       -       n       -       -       smtpd
   -o milter_macro_daemon_name=ORIGINATING" | sudo tee -a /etc/postfix/master.cf
 
 # Enable and configure Cyrus SASL
+echo "Configuring Cyrus SASL..."
 sudo sed -i 's/^START=no/START=yes/' /etc/default/saslauthd
 sudo sed -i 's/^MECHANISMS=".*"/MECHANISMS="sasldb"/' /etc/default/saslauthd
 sudo sed -i 's|^OPTIONS="-c"|OPTIONS="-c -m /var/spool/postfix/var/run/saslauthd"|' /etc/default/saslauthd
@@ -171,6 +189,7 @@ sudo ln -s /var/spool/postfix/var/run/saslauthd /var/run/saslauthd
 sudo adduser postfix sasl
 
 # Create the user in sasldb2
+echo "Creating SMTP authentication user..."
 echo "$PASSWORD" | sudo saslpasswd2 -c "$USERNAME" -p
 sudo chown postfix:postfix /etc/sasldb2
 sudo chmod 660 /etc/sasldb2
@@ -187,14 +206,17 @@ else
 fi
 
 # Enable services to start on boot
+echo "Enabling Postfix and SASL services to start on boot..."
 sudo systemctl enable saslauthd
 sudo systemctl enable postfix
 
 # Restart services
+echo "Restarting SASL and Postfix services..."
 sudo systemctl restart saslauthd
 sudo systemctl restart postfix
 
 # Configure UFW Firewall (Optional but recommended)
+echo "Configuring UFW firewall rules..."
 # Allow SMTP ports
 sudo ufw allow 25/tcp
 sudo ufw allow 587/tcp
@@ -212,27 +234,33 @@ echo "Starting amavisd-new installation and configuration..."
 sudo apt-get install -y amavisd-new spamassassin clamav clamav-daemon
 
 # Enable and start ClamAV
+echo "Enabling and starting ClamAV daemon..."
 sudo systemctl enable clamav-daemon
 sudo systemctl start clamav-daemon
 
 # Update ClamAV database
+echo "Updating ClamAV database..."
 sudo freshclam
 
 # Enable and configure SpamAssassin
+echo "Enabling and configuring SpamAssassin..."
 sudo systemctl enable spamassassin
 sudo systemctl start spamassassin
 sudo sed -i 's/^ENABLED=.*/ENABLED=1/' /etc/default/spamassassin
 sudo sed -i 's/^OPTIONS=.*/OPTIONS="--create-prefs --max-children 5 --helper-home-dir --username spamd"/' /etc/default/spamassassin
 
 # Configure amavisd-new
+echo "Configuring amavisd-new as Postfix content filter..."
 sudo postconf -e "content_filter = smtp-amavis:[127.0.0.1]:10024"
 
 # Backup existing amavisd.conf if it exists
 if [ -f /etc/amavis/conf.d/50-user ]; then
+    echo "Backing up existing amavisd-new configuration..."
     sudo cp /etc/amavis/conf.d/50-user /etc/amavis/conf.d/50-user.bak
 fi
 
 # Configure amavisd-new settings
+echo "Configuring amavisd-new settings..."
 sudo tee /etc/amavis/conf.d/50-user > /dev/null <<EOL
 # Content scanning
 use strict;
@@ -248,8 +276,8 @@ $sa_tag_level_deflt  = -999;  # avoid spamassassin marking
 $sa_tag2_level_deflt = 5;     # add header "Spam: Yes" if at or above this level
 $sa_kill_level_deflt = 10;    # trigger spam evasions (quarantine, etc.)
 
-$virus_quarantine_to = 'virus-quarantine@yourdomain.com'; # Change as needed
-$sa_quarantine_to    = 'spam-quarantine@yourdomain.com';  # Change as needed
+$virus_quarantine_to = 'virus-quarantine@$HOSTNAME'; # Change as needed
+$sa_quarantine_to    = 'spam-quarantine@$HOSTNAME';  # Change as needed
 
 # Enable virus scanning
 @av_scanners = (
@@ -263,12 +291,12 @@ $bayes_auto_learn = 1;
 
 EOL
 
-# Replace 'yourdomain.com' with actual domain
-sudo sed -i "s/yourdomain\.com/$HOSTNAME/g" /etc/amavis/conf.d/50-user
-
 # Integrate amavisd-new with Postfix via master.cf
-# Add amavis service
-echo "127.0.0.1:10024 inet n  -       n       -       -       smtp
+echo "Integrating amavisd-new with Postfix..."
+# Add amavis service to Postfix master.cf
+sudo tee -a /etc/postfix/master.cf > /dev/null <<EOL
+# amavisd-new content filter
+127.0.0.1:10024 inet n  -       n       -       -       smtp
     -o content_filter=
     -o receive_override_options=no_header_body_checks,no_unknown_recipient_checks
     -o smtpd_helo_restrictions=
@@ -279,9 +307,9 @@ echo "127.0.0.1:10024 inet n  -       n       -       -       smtp
     -o smtpd_tls_security_level=none
     -o smtpd_sasl_auth_enable=no
     -o smtpd_relay_restrictions=permit_mynetworks, permit_sasl_authenticated, reject
-    -o mynetworks=127.0.0.0/8" | sudo tee -a /etc/postfix/master.cf
+    -o mynetworks=127.0.0.0/8
 
-echo "127.0.0.1:10025 inet n  -       n       -       -       smtpd
+127.0.0.1:10025 inet n  -       n       -       -       smtpd
     -o content_filter=
     -o receive_override_options=no_header_body_checks
     -o smtpd_helo_restrictions=
@@ -291,23 +319,29 @@ echo "127.0.0.1:10025 inet n  -       n       -       -       smtpd
     -o smtpd_bind_address=127.0.0.1
     -o smtpd_tls_security_level=none
     -o smtpd_sasl_auth_enable=no
-    -o mynetworks=127.0.0.0/8" | sudo tee -a /etc/postfix/master.cf
+    -o mynetworks=127.0.0.0/8
+EOL
 
 # Restart Postfix and amavisd-new
+echo "Restarting amavisd-new and Postfix services..."
 sudo systemctl restart amavis
 sudo systemctl restart postfix
 
 # Add amavis user to postfix group
+echo "Adding amavis user to postfix group..."
 sudo usermod -aG postfix amavis
 
 # Configure SpamAssassin to work with amavisd-new
+echo "Ensuring SpamAssassin is enabled..."
 sudo sed -i 's/^ENABLED=.*/ENABLED=1/' /etc/default/spamassassin
 sudo systemctl restart spamassassin
 
 # Configure mail flow
+echo "Configuring mail flow options..."
 sudo postconf -e "receive_override_options = no_address_mappings"
 
 # Reload Postfix to apply all changes
+echo "Reloading Postfix configuration..."
 sudo systemctl reload postfix
 
 # ============================================
@@ -316,7 +350,9 @@ sudo systemctl reload postfix
 
 # Display the SMTP credentials
 echo
-echo "Postfix and amavisd-new have been installed and configured."
+echo "========================================"
+echo "Postfix and amavisd-new have been installed and configured successfully."
+echo "========================================"
 echo
 echo "SMTP Credentials:"
 echo "Host: $HOSTNAME"
