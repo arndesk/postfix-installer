@@ -227,14 +227,21 @@ echo "Starting amavisd-new installation and configuration..."
 # Install amavisd-new and dependencies
 sudo apt-get install -y amavisd-new spamassassin clamav clamav-daemon
 
-# Enable and start ClamAV
-echo "Enabling and starting ClamAV daemon..."
+# Enable and start ClamAV daemon
+echo "Enabling ClamAV daemon to start on boot..."
 sudo systemctl enable clamav-daemon
-sudo systemctl start clamav-daemon
+
+# Stop ClamAV daemon before updating
+echo "Stopping ClamAV daemon before updating virus definitions..."
+sudo systemctl stop clamav-daemon
 
 # Update ClamAV database
-echo "Updating ClamAV database..."
+echo "Updating ClamAV virus definitions..."
 sudo freshclam
+
+# Start ClamAV daemon after updating
+echo "Starting ClamAV daemon..."
+sudo systemctl start clamav-daemon
 
 # Enable and configure SpamAssassin
 echo "Enabling and configuring SpamAssassin..."
