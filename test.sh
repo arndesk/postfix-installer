@@ -133,19 +133,30 @@ configure_exim4() {
     sudo sed -i "s/^dc_ip_version=.*/dc_ip_version='$SMTP_PREF'/g" /etc/exim4/update-exim4.conf.conf
 
     # Configure Exim4 to listen on port 587
+    sudo sed -i '/^daemon_smtp_ports/d' /etc/exim4/exim4.conf.localmacros
     echo "daemon_smtp_ports = 25 : 587" | sudo tee -a /etc/exim4/exim4.conf.localmacros
 
-    # Enable TLS (Let's assume we want to support TLS)
-    # For simplicity, we will generate a self-signed certificate
-    sudo openssl req -new -x509 -nodes -days 365 -subj "/CN=$HOSTNAME" -out /etc/ssl/certs/exim.crt -keyout /etc/ssl/private/exim.key
-    sudo chmod 640 /etc/ssl/private/exim.key
-    sudo chown root:Debian-exim /etc/ssl/private/exim.key
+    # Enable TLS (Generate a self-signed certificate)
+    if [ ! -f /etc/ssl/certs/exim.crt ] || [ ! -f /etc/ssl/private/exim.key ]; then
+        sudo openssl req -new -x509 -nodes -days 365 -subj "/CN=$HOSTNAME" -out /etc/ssl/certs/exim.crt -keyout /etc/ssl/private/exim.key
+        sudo chmod 640 /etc/ssl/private/exim.key
+        sudo chown root:Debian-exim /etc/ssl/private/exim.key
+    fi
 
+    # Update or add MAIN_TLS_ENABLE
+    sudo sed -i '/^MAIN_TLS_ENABLE/d' /etc/exim4/exim4.conf.localmacros
     echo "MAIN_TLS_ENABLE = yes" | sudo tee -a /etc/exim4/exim4.conf.localmacros
+
+    # Update or add tls_certificate
+    sudo sed -i '/^tls_certificate/d' /etc/exim4/exim4.conf.localmacros
     echo "tls_certificate = /etc/ssl/certs/exim.crt" | sudo tee -a /etc/exim4/exim4.conf.localmacros
+
+    # Update or add tls_privatekey
+    sudo sed -i '/^tls_privatekey/d' /etc/exim4/exim4.conf.localmacros
     echo "tls_privatekey = /etc/ssl/private/exim.key" | sudo tee -a /etc/exim4/exim4.conf.localmacros
 
     # Enable SMTP authentication
+    sudo sed -i '/^AUTH_CLIENT_ALLOW_NOTLS_PASSWORDS/d' /etc/exim4/exim4.conf.localmacros
     echo "AUTH_CLIENT_ALLOW_NOTLS_PASSWORDS = yes" | sudo tee -a /etc/exim4/exim4.conf.localmacros
 
     # Set up authentication
@@ -155,24 +166,24 @@ configure_exim4() {
     sudo chown root:Debian-exim /etc/exim4/passwd
 
     # Add the user to the passwd file
+    sudo sed -i "/^$USERNAME:/d" /etc/exim4/passwd
     echo "$USERNAME:$PASSWORD" | sudo tee -a /etc/exim4/passwd
 
     # Configure Exim to use the authentication file
-    sudo tee /etc/exim4/conf.d/auth/30_exim4_config_local <<< '
+    sudo tee /etc/exim4/conf.d/auth/30_exim4_config_local << EOF
 plain_login:
   driver = plaintext
   public_name = LOGIN
   server_prompts = Username:: : Password::
-  server_condition = "${if eq{$auth2}{${lookup{$auth1}lsearch{/etc/exim4/passwd}{$value}{*}}}{yes}{no}}"
-  server_set_id = $auth1
-'
+  server_condition = \\
+    \${if eq{\$auth2}{\${lookup{\$auth1}lsearch{/etc/exim4/passwd}{\$value}{*}}}{yes}{no}}
+  server_set_id = \$auth1
+EOF
 
     # Remove 'Received' headers if requested
+    sudo sed -i '/^received_header_text/d' /etc/exim4/exim4.conf.localmacros
     if [ "$REMOVE_HEADER" = "yes" ]; then
         echo "received_header_text = " | sudo tee -a /etc/exim4/exim4.conf.localmacros
-    else
-        # Ensure 'received_header_text' is not set
-        sudo sed -i '/^received_header_text/d' /etc/exim4/exim4.conf.localmacros
     fi
 
     # Update Exim configuration
@@ -250,10 +261,9 @@ display_menu() {
                 fi
                 prompt_remove_header
                 # Reconfigure header removal
+                sudo sed -i '/^received_header_text/d' /etc/exim4/exim4.conf.localmacros
                 if [ "$REMOVE_HEADER" = "yes" ]; then
                     echo "received_header_text = " | sudo tee -a /etc/exim4/exim4.conf.localmacros
-                else
-                    sudo sed -i '/^received_header_text/d' /etc/exim4/exim4.conf.localmacros
                 fi
                 ;;
             5)
