@@ -178,13 +178,17 @@ SubDomains              no
 AutoRestart             yes
 AutoRestartRate         10/1h
 SoftwareHeader          yes
+Socket                  inet:12345@localhost
+PidFile                 /run/opendkim/opendkim.pid
+UserID                  opendkim:opendkim
 
 KeyTable                /etc/opendkim/key.table
-SigningTable            /etc/opendkim/signing.table
+SigningTable            refile:/etc/opendkim/signing.table
 ExternalIgnoreList      /etc/opendkim/trusted.hosts
 InternalHosts           /etc/opendkim/trusted.hosts
 
-Socket                  inet:12345@localhost
+OversignHeaders         From
+SenderHeaders           From,Sender
 EOF
 
     # Configure trusted hosts
@@ -203,13 +207,19 @@ EOF
         domain=$(echo "$domain" | xargs)
         # Add entries to key.table and signing.table
         echo "$DKIM_SELECTOR._domainkey.$domain $domain:$DKIM_SELECTOR:/etc/opendkim/keys/$domain.private" | sudo tee -a /etc/opendkim/key.table
-        echo "*@$domain $DKIM_SELECTOR._domainkey.$domain" | sudo tee -a /etc/opendkim/signing.table
+        # Use regex in signing.table to match any email from the domain
+        echo "/^.*@${domain}$/    $DKIM_SELECTOR._domainkey.${domain}" | sudo tee -a /etc/opendkim/signing.table
 
         # Save the private key
         echo -e "$DKIM_PRIVATE_KEY_CONTENT" | sudo tee "/etc/opendkim/keys/$domain.private" > /dev/null
         sudo chmod 600 "/etc/opendkim/keys/$domain.private"
         sudo chown opendkim:opendkim "/etc/opendkim/keys/$domain.private"
     done
+
+    # Ensure PID directory exists and has correct permissions
+    sudo mkdir -p /run/opendkim
+    sudo chown opendkim:opendkim /run/opendkim
+    sudo chmod 755 /run/opendkim
 
     # Configure OpenDKIM to run as a milter
     sudo sed -i 's|^SOCKET=.*|SOCKET="inet:12345@localhost"|' /etc/default/opendkim
@@ -219,6 +229,12 @@ EOF
     sudo postconf -e "milter_default_action = accept"
     sudo postconf -e "smtpd_milters = inet:localhost:12345"
     sudo postconf -e "non_smtpd_milters = inet:localhost:12345"
+
+    # Ensure systemd service file is correctly configured
+    sudo sed -i 's|^PIDFile=.*|PIDFile=/run/opendkim/opendkim.pid|' /lib/systemd/system/opendkim.service
+
+    # Reload systemd daemon
+    sudo systemctl daemon-reload
 }
 
 # Function to restart services
