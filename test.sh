@@ -73,7 +73,7 @@ else
     while true; do
         read -p "Reverse DNS not found. Please enter the hostname manually (e.g., mail.yourdomain.com): " HOSTNAME
         if [[ "$HOSTNAME" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-            # Optional: Validate that the hostname is fully qualified (has at least one dot)
+            # Validate that the hostname is fully qualified (has at least one dot)
             if [[ "$HOSTNAME" =~ \. ]]; then
                 break
             else
@@ -215,13 +215,7 @@ echo "Restarting SASL and Postfix services..."
 sudo systemctl restart saslauthd
 sudo systemctl restart postfix
 
-# Configure UFW Firewall (Optional but recommended)
-echo "Configuring UFW firewall rules..."
-# Allow SMTP ports
-sudo ufw allow 25/tcp
-sudo ufw allow 587/tcp
-sudo ufw allow 465/tcp
-sudo ufw reload
+# Note: Skipping UFW configuration as per user preference
 
 # ============================================
 # Begin amavisd-new Integration
@@ -272,22 +266,22 @@ use warnings;
 @bypass_spam_checks_maps = (
     \%bypass_spam_checks, \@bypass_spam_checks_acl, \@bypass_spam_checks_re);
 
-$sa_tag_level_deflt  = -999;  # avoid spamassassin marking
-$sa_tag2_level_deflt = 5;     # add header "Spam: Yes" if at or above this level
-$sa_kill_level_deflt = 10;    # trigger spam evasions (quarantine, etc.)
+\$sa_tag_level_deflt  = -999;  # avoid spamassassin marking
+\$sa_tag2_level_deflt = 5;     # add header "Spam: Yes" if at or above this level
+\$sa_kill_level_deflt = 10;    # trigger spam evasions (quarantine, etc.)
 
-$virus_quarantine_to = 'virus-quarantine@$HOSTNAME'; # Change as needed
-$sa_quarantine_to    = 'spam-quarantine@$HOSTNAME';  # Change as needed
+\$virus_quarantine_to = 'virus-quarantine@$HOSTNAME'; # Change as needed
+\$sa_quarantine_to    = 'spam-quarantine@$HOSTNAME';  # Change as needed
 
 # Enable virus scanning
 @av_scanners = (
-    ['ClamAV-clamscan', \&ask_daemon, ["CONTSCAN {}\n", "/var/run/clamav/clamd.ctl"], qr/\bOK$/, qr/\bFOUND$/]
+    ['ClamAV-clamscan', \&ask_daemon, ["CONTSCAN {}\n", "/var/run/clamav/clamd.ctl"], qr/\bOK\$/, qr/\bFOUND\$/]
 );
 
 # Enable spam scanning
-$enable_dcc     = 0;
-$enable_bayes   = 1;
-$bayes_auto_learn = 1;
+\$enable_dcc     = 0;
+\$enable_bayes   = 1;
+\$bayes_auto_learn = 1;
 
 EOL
 
