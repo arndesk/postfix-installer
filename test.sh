@@ -22,6 +22,7 @@ get_public_ip() {
 # Function to get reverse DNS of the public IP
 get_rdns() {
     RDNS=$(dig -x "$PUBLIC_IP" +short | sed 's/\.$//')
+    # Removed the exit to allow manual input if rDNS is not found
 }
 
 # Get public IP and reverse DNS
@@ -30,14 +31,14 @@ get_rdns
 
 # Prompt for hostname
 if [ -n "$RDNS" ]; then
-    # If RDNS is found, use it as the default and enforce matching if the user chooses to use the default
+    # If rDNS is found, use it as the default and allow user to override
     while true; do
         read -e -p "Enter the hostname [${RDNS}]: " HOSTNAME
         HOSTNAME=${HOSTNAME:-$RDNS}
         if [ "$HOSTNAME" = "$RDNS" ]; then
             break
         else
-            # Optional: Allow the user to proceed with a different hostname
+            # Ask if the user wants to proceed with a non-matching hostname
             read -p "The entered hostname does not match the reverse DNS of the server's public IP ($RDNS). Do you want to proceed with this hostname? (yes/no) [no]: " PROCEED
             PROCEED=${PROCEED,,} # Convert to lowercase
             PROCEED=${PROCEED:-no}
@@ -55,11 +56,16 @@ if [ -n "$RDNS" ]; then
         fi
     done
 else
-    # If RDNS is not found, prompt the user to input the hostname manually without any default
+    # If rDNS is not found, prompt the user to input the hostname manually without any default
     while true; do
-        read -p "Reverse DNS not found. Please enter the hostname manually: " HOSTNAME
+        read -p "Reverse DNS not found. Please enter the hostname manually (e.g., mail.yourdomain.com): " HOSTNAME
         if [[ "$HOSTNAME" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-            break
+            # Optional: Validate that the hostname is fully qualified (ends with a dot or has at least one dot)
+            if [[ "$HOSTNAME" =~ \. ]]; then
+                break
+            else
+                echo "Hostname must be a fully qualified domain name (e.g., mail.yourdomain.com)."
+            fi
         else
             echo "Invalid hostname format. Please enter a valid fully qualified domain name (e.g., mail.yourdomain.com)."
         fi
