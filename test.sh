@@ -2,7 +2,6 @@
 
 # This script installs and configures Postfix as an SMTP server with authentication on port 587.
 # It sets up SMTP authentication for use with Nodemailer.
-# It also optionally configures DKIM signing for outgoing emails.
 # If the script is run multiple times, it provides options to edit configurations.
 
 # Install necessary tools
@@ -59,7 +58,7 @@ prompt_smtp_pref() {
                 echo "Invalid option. Please enter 'ipv6', 'ipv4', or 'any'."
                 ;;
         esac
-    done
+    fi
 }
 
 # Function to prompt for removing Received header
@@ -85,59 +84,6 @@ prompt_remove_header() {
     done
 }
 
-# Function to prompt for DKIM configuration
-prompt_dkim() {
-    if systemctl is-enabled opendkim &> /dev/null; then
-        CURRENT_DKIM_STATUS="enabled"
-    else
-        CURRENT_DKIM_STATUS="disabled"
-    fi
-    while true; do
-        read -p "Do you want to enable DKIM signing for outgoing emails? (yes/no) [${CURRENT_DKIM_STATUS}]: " ENABLE_DKIM
-        ENABLE_DKIM=${ENABLE_DKIM,,} # Convert to lowercase
-        ENABLE_DKIM=${ENABLE_DKIM:-$CURRENT_DKIM_STATUS}
-        case "$ENABLE_DKIM" in
-            yes|no)
-                break
-                ;;
-            *)
-                echo "Please answer yes or no."
-                ;;
-        esac
-    done
-
-    if [ "$ENABLE_DKIM" = "yes" ]; then
-        # Prompt for DKIM selector
-        read -p "Enter the DKIM selector (e.g., default): " DKIM_SELECTOR
-
-        # Prompt for DKIM private key content
-        echo "Please paste your DKIM private key (end with EOF or an empty line):"
-        DKIM_PRIVATE_KEY_CONTENT=""
-        while IFS= read -r line; do
-            [ -z "$line" ] && break
-            DKIM_PRIVATE_KEY_CONTENT="$DKIM_PRIVATE_KEY_CONTENT$line\n"
-        done
-
-        if [ -z "$DKIM_PRIVATE_KEY_CONTENT" ]; then
-            echo "Private key cannot be empty. Please enter a valid private key."
-            exit 1
-        fi
-
-        # Prompt for domain list
-        echo "Enter the domains for DKIM signing (one per line, end with an empty line):"
-        DOMAIN_ARRAY=()
-        while IFS= read -r domain; do
-            [ -z "$domain" ] && break
-            DOMAIN_ARRAY+=("$domain")
-        done
-
-        if [ ${#DOMAIN_ARRAY[@]} -eq 0 ]; then
-            echo "Domain list cannot be empty. Please enter at least one domain."
-            exit 1
-        fi
-    fi
-}
-
 # Function to prompt for SMTP authentication credentials
 prompt_smtp_credentials() {
     # Prompt for username
@@ -158,103 +104,14 @@ prompt_smtp_credentials() {
     done
 }
 
-# Function to configure DKIM
-configure_dkim() {
-    echo "Configuring DKIM..."
-
-    # Install OpenDKIM and its tools
-    sudo apt-get install -y opendkim opendkim-tools
-
-    # Create necessary directories and set permissions
-    sudo mkdir -p /etc/opendkim/keys
-
-    # Create OpenDKIM configuration files
-    sudo tee /etc/opendkim.conf > /dev/null <<EOF
-Syslog                  yes
-UMask                   002
-Canonicalization        relaxed/simple
-Mode                    sv
-SubDomains              no
-AutoRestart             yes
-AutoRestartRate         10/1h
-SoftwareHeader          yes
-Socket                  inet:12345@localhost
-PidFile                 /run/opendkim/opendkim.pid
-UserID                  opendkim:opendkim
-
-KeyTable                /etc/opendkim/key.table
-SigningTable            refile:/etc/opendkim/signing.table
-ExternalIgnoreList      /etc/opendkim/trusted.hosts
-InternalHosts           /etc/opendkim/trusted.hosts
-
-OversignHeaders         From
-SenderHeaders           From,Sender
-EOF
-
-    # Configure trusted hosts
-    sudo tee /etc/opendkim/trusted.hosts > /dev/null <<EOF
-127.0.0.1
-localhost
-$PUBLIC_IP
-EOF
-
-    # Configure KeyTable and SigningTable
-    sudo bash -c 'echo -n "" > /etc/opendkim/key.table'
-    sudo bash -c 'echo -n "" > /etc/opendkim/signing.table'
-
-    for domain in "${DOMAIN_ARRAY[@]}"; do
-        # Remove possible trailing whitespace
-        domain=$(echo "$domain" | xargs)
-        # Add entries to key.table and signing.table
-        echo "$DKIM_SELECTOR._domainkey.$domain $domain:$DKIM_SELECTOR:/etc/opendkim/keys/$domain.private" | sudo tee -a /etc/opendkim/key.table
-        # Use regex in signing.table to match any email from the domain
-        echo "/^.*@${domain}$/    $DKIM_SELECTOR._domainkey.${domain}" | sudo tee -a /etc/opendkim/signing.table
-
-        # Save the private key
-        echo -e "$DKIM_PRIVATE_KEY_CONTENT" | sudo tee "/etc/opendkim/keys/$domain.private" > /dev/null
-        sudo chmod 600 "/etc/opendkim/keys/$domain.private"
-        sudo chown opendkim:opendkim "/etc/opendkim/keys/$domain.private"
-    done
-
-    # Ensure PID directory exists and has correct permissions
-    sudo mkdir -p /run/opendkim
-    sudo chown opendkim:opendkim /run/opendkim
-    sudo chmod 755 /run/opendkim
-
-    # Configure OpenDKIM to run as a milter
-    sudo sed -i 's|^SOCKET=.*|SOCKET="inet:12345@localhost"|' /etc/default/opendkim
-
-    # Update Postfix main.cf to use OpenDKIM
-    sudo postconf -e "milter_protocol = 2"
-    sudo postconf -e "milter_default_action = accept"
-    sudo postconf -e "smtpd_milters = inet:localhost:12345"
-    sudo postconf -e "non_smtpd_milters = inet:localhost:12345"
-
-    # Ensure systemd service file is correctly configured
-    sudo sed -i 's|^PIDFile=.*|PIDFile=/run/opendkim/opendkim.pid|' /lib/systemd/system/opendkim.service
-
-    # Reload systemd daemon
-    sudo systemctl daemon-reload
-}
-
 # Function to restart services
 restart_services() {
     # Enable services to start on boot
     sudo systemctl enable saslauthd
     sudo systemctl enable postfix
-    if [ "$ENABLE_DKIM" = "yes" ]; then
-        sudo systemctl enable opendkim
-    else
-        sudo systemctl disable opendkim
-    fi
 
     # Restart services
     sudo service saslauthd restart
-    if [ "$ENABLE_DKIM" = "yes" ]; then
-        sudo service opendkim restart
-    else
-        sudo service opendkim stop
-    fi
     sudo service postfix restart
 }
 
@@ -301,8 +158,11 @@ configure_postfix() {
   -o smtpd_tls_security_level=encrypt
   -o smtpd_sasl_auth_enable=yes
   -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
-  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
-  -o milter_macro_daemon_name=ORIGINATING" | sudo tee -a /etc/postfix/master.cf
+  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject" | sudo tee -a /etc/postfix/master.cf
+
+    # Ensure no milters are configured
+    sudo postconf -e "smtpd_milters ="
+    sudo postconf -e "non_smtpd_milters ="
 
     # Enable and configure Cyrus SASL
     sudo sed -i 's/^START=no/START=yes/' /etc/default/saslauthd
@@ -365,23 +225,16 @@ display_menu() {
         echo "2) Add or edit SMTP users"
         CURRENT_SMTP_PREF=$(postconf -h smtp_address_preference)
         echo "3) Edit SMTP address preference (current: ${CURRENT_SMTP_PREF})"
-        if systemctl is-enabled opendkim &> /dev/null; then
-            DKIM_STATUS="enabled"
-        else
-            DKIM_STATUS="disabled"
-        fi
-        echo "4) Edit DKIM configuration"
-        echo "5) Toggle DKIM on/off (currently: ${DKIM_STATUS})"
         CURRENT_HEADER_SETTING=$(postconf -h header_checks 2>/dev/null)
         if [ "$CURRENT_HEADER_SETTING" = "regexp:/etc/postfix/header_checks" ]; then
             HEADER_STATUS="enabled"
         else
             HEADER_STATUS="disabled"
         fi
-        echo "6) Toggle 'Received' header removal (currently: ${HEADER_STATUS})"
-        echo "7) Quit"
+        echo "4) Toggle 'Received' header removal (currently: ${HEADER_STATUS})"
+        echo "5) Quit"
 
-        read -p "Enter your choice [1-7]: " CHOICE
+        read -p "Enter your choice [1-5]: " CHOICE
         case "$CHOICE" in
             1)
                 prompt_hostname
@@ -399,27 +252,6 @@ display_menu() {
                 sudo postconf -e "smtp_address_preference = $SMTP_PREF"
                 ;;
             4)
-                prompt_dkim
-                if [ "$ENABLE_DKIM" = "yes" ]; then
-                    configure_dkim
-                fi
-                ;;
-            5)
-                if systemctl is-enabled opendkim &> /dev/null; then
-                    ENABLE_DKIM="no"
-                    sudo systemctl stop opendkim
-                    sudo systemctl disable opendkim
-                    sudo postconf -e "smtpd_milters ="
-                    sudo postconf -e "non_smtpd_milters ="
-                    echo "DKIM has been disabled."
-                else
-                    ENABLE_DKIM="yes"
-                    prompt_dkim
-                    configure_dkim
-                    echo "DKIM has been enabled."
-                fi
-                ;;
-            6)
                 if [ "$HEADER_STATUS" = "enabled" ]; then
                     REMOVE_HEADER="no"
                 else
@@ -435,7 +267,7 @@ display_menu() {
                     sudo rm -f /etc/postfix/header_checks
                 fi
                 ;;
-            7)
+            5)
                 exit 0
                 ;;
             *)
@@ -462,13 +294,8 @@ else
     prompt_smtp_pref
     prompt_remove_header
     prompt_smtp_credentials
-    prompt_dkim
 
     configure_postfix
-
-    if [ "$ENABLE_DKIM" = "yes" ]; then
-        configure_dkim
-    fi
 
     restart_services
     display_credentials
