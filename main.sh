@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # This script installs and configures Postfix as an SMTP server with authentication on port 587.
-# It sets up SMTP authentication for use with Nodemailer and integrates Amavisd-new for spam and virus filtering.
+# It sets up SMTP authentication for use with Nodemailer and integrates Amavisd-new for spam and virus filtering with headers.
 
 set -e
 
@@ -12,6 +12,11 @@ function echo_info {
 
 function echo_error {
     echo -e "\\033[1;31m[ERROR]\\033[0m $1" >&2
+}
+
+# Function to check if a service is active
+function check_service {
+    systemctl is-active --quiet "$1"
 }
 
 # Install necessary tools
@@ -116,6 +121,24 @@ sudo apt-get install -y amavisd-new spamassassin clamav clamav-daemon
 echo_info "Stopping Postfix service for configuration..."
 sudo systemctl stop postfix
 
+# Stop ClamAV daemon before updating virus definitions
+echo_info "Stopping ClamAV daemon before updating virus definitions..."
+sudo systemctl stop clamav-daemon
+
+# Ensure no other freshclam processes are running
+if pgrep freshclam > /dev/null; then
+    echo_info "Stopping any running freshclam processes..."
+    sudo pkill freshclam
+fi
+
+# Update ClamAV virus definitions
+echo_info "Updating ClamAV virus definitions..."
+sudo freshclam || { echo_error "Failed to update ClamAV virus definitions."; exit 1; }
+
+# Restart ClamAV daemon after updating
+echo_info "Restarting ClamAV daemon..."
+sudo systemctl start clamav-daemon
+
 # Configure Postfix main.cf
 echo_info "Configuring Postfix..."
 sudo postconf -e "smtpd_banner = \$myhostname ESMTP"
@@ -166,7 +189,7 @@ echo_info "Setting up SASL authentication directories..."
 sudo mkdir -p /var/spool/postfix/var/run/saslauthd
 sudo rm -rf /var/run/saslauthd
 sudo ln -s /var/spool/postfix/var/run/saslauthd /var/run/saslauthd
-sudo chown -R sasl:sasld /var/spool/postfix/var/run/saslauthd
+sudo chown -R sasl:sasl /var/spool/postfix/var/run/saslauthd
 
 # Add Postfix user to the SASL group
 sudo adduser postfix sasl || true
@@ -185,13 +208,29 @@ sudo systemctl enable amavis
 sudo systemctl enable clamav-daemon
 sudo systemctl enable spamassassin
 
-# Configure Amavisd-new
-echo_info "Configuring Amavisd-new..."
-sudo postconf -e "content_filter = amavis:[127.0.0.1]:10024"
-sudo postconf -e "receive_override_options = no_address_mappings"
+# Configure Amavisd-new to add headers
+echo_info "Configuring Amavisd-new to add headers..."
+# Backup existing configuration
+sudo cp /etc/amavis/conf.d/50-user /etc/amavis/conf.d/50-user.bak
 
-# Allow Postfix to communicate with Amavis
-sudo sed -i 's/^@bypass_virus_checks_maps.*/@bypass_virus_checks_maps = (1);\n@bypass_spam_checks_maps = (1);/' /etc/amavis/conf.d/15-content_filter_mode
+# Append header configurations
+sudo tee -a /etc/amavis/conf.d/50-user > /dev/null <<EOL
+
+# Add custom headers added by Amavisd-new
+@my_headers = (
+    'X-Amavis-Alert',
+    'X-Amavis-Version',
+    'X-Spam-Flag',
+    'X-Spam-Level',
+    'X-Spam-Status',
+    'X-Virus-Scanned',
+    'X-Virus-Status'
+);
+EOL
+
+# Ensure that Amavis-new adds headers by not bypassing them
+sudo sed -i 's/^@bypass_virus_checks_maps.*/@bypass_virus_checks_maps = (0);/' /etc/amavis/conf.d/15-content_filter_mode
+sudo sed -i 's/^@bypass_spam_checks_maps.*/@bypass_spam_checks_maps = (0);/' /etc/amavis/conf.d/15-content_filter_mode
 
 # Restart and start services
 echo_info "Restarting and starting services..."
@@ -200,6 +239,16 @@ sudo systemctl restart postfix
 sudo systemctl restart amavis
 sudo systemctl restart clamav-daemon
 sudo systemctl restart spamassassin
+
+# Verify that services are running
+SERVICES=("postfix" "saslauthd" "amavis" "clamav-daemon" "spamassassin")
+for service in "${SERVICES[@]}"; do
+    if check_service "$service"; then
+        echo_info "$service is running."
+    else
+        echo_error "$service is not running. Please check its status."
+    fi
+done
 
 # Display the SMTP credentials
 echo
@@ -213,6 +262,7 @@ echo "Password: $PASSWORD"
 echo
 echo "You can now use these SMTP details in Nodemailer."
 echo
-echo "Additionally, Amavisd-new has been installed and configured for spam and virus filtering."
+echo "Additionally, Amavisd-new has been installed and configured for spam and virus filtering with headers."
+echo "Emails processed by Amavisd-new will include headers such as X-Amavis-Alert, X-Spam-Status, and X-Virus-Status."
 
 # End of script
