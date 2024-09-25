@@ -47,9 +47,10 @@ prompt_hostname() {
 
 # Function to prompt for SMTP address preference
 prompt_smtp_pref() {
+    CURRENT_SMTP_PREF=$(postconf -h smtp_address_preference 2>/dev/null || echo "ipv4")
     while true; do
-        read -p "Set smtp_address_preference (ipv6, ipv4, any) [ipv4]: " SMTP_PREF
-        SMTP_PREF=${SMTP_PREF:-ipv4}
+        read -p "Set smtp_address_preference (ipv6, ipv4, any) [${CURRENT_SMTP_PREF}]: " SMTP_PREF
+        SMTP_PREF=${SMTP_PREF:-$CURRENT_SMTP_PREF}
         case "$SMTP_PREF" in
             ipv6|ipv4|any)
                 break
@@ -63,10 +64,16 @@ prompt_smtp_pref() {
 
 # Function to prompt for removing Received header
 prompt_remove_header() {
+    CURRENT_HEADER_SETTING=$(postconf -h header_checks 2>/dev/null)
+    if [ "$CURRENT_HEADER_SETTING" = "regexp:/etc/postfix/header_checks" ]; then
+        CURRENT_REMOVE_HEADER="yes"
+    else
+        CURRENT_REMOVE_HEADER="no"
+    fi
     while true; do
-        read -p "Do you want to remove the 'Received' header from outgoing emails? (yes/no) [no]: " REMOVE_HEADER
+        read -p "Do you want to remove the 'Received' header from outgoing emails? (yes/no) [${CURRENT_REMOVE_HEADER}]: " REMOVE_HEADER
         REMOVE_HEADER=${REMOVE_HEADER,,} # Convert to lowercase
-        REMOVE_HEADER=${REMOVE_HEADER:-no}
+        REMOVE_HEADER=${REMOVE_HEADER:-$CURRENT_REMOVE_HEADER}
         case "$REMOVE_HEADER" in
             yes|no)
                 break
@@ -80,10 +87,15 @@ prompt_remove_header() {
 
 # Function to prompt for DKIM configuration
 prompt_dkim() {
+    if systemctl is-enabled opendkim &> /dev/null; then
+        CURRENT_DKIM_STATUS="enabled"
+    else
+        CURRENT_DKIM_STATUS="disabled"
+    fi
     while true; do
-        read -p "Do you want to enable DKIM signing for outgoing emails? (yes/no) [no]: " ENABLE_DKIM
+        read -p "Do you want to enable DKIM signing for outgoing emails? (yes/no) [${CURRENT_DKIM_STATUS}]: " ENABLE_DKIM
         ENABLE_DKIM=${ENABLE_DKIM,,} # Convert to lowercase
-        ENABLE_DKIM=${ENABLE_DKIM:-no}
+        ENABLE_DKIM=${ENABLE_DKIM:-$CURRENT_DKIM_STATUS}
         case "$ENABLE_DKIM" in
             yes|no)
                 break
@@ -96,14 +108,7 @@ prompt_dkim() {
 
     if [ "$ENABLE_DKIM" = "yes" ]; then
         # Prompt for DKIM selector
-        while true; do
-            read -p "Enter the DKIM selector (e.g., default): " DKIM_SELECTOR
-            if [ -n "$DKIM_SELECTOR" ]; then
-                break
-            else
-                echo "Selector cannot be empty. Please enter a valid DKIM selector."
-            fi
-        done
+        read -p "Enter the DKIM selector (e.g., default): " DKIM_SELECTOR
 
         # Prompt for DKIM private key content
         echo "Please paste your DKIM private key (end with EOF or an empty line):"
@@ -178,6 +183,8 @@ KeyTable                /etc/opendkim/key.table
 SigningTable            /etc/opendkim/signing.table
 ExternalIgnoreList      /etc/opendkim/trusted.hosts
 InternalHosts           /etc/opendkim/trusted.hosts
+
+Socket                  inet:12345@localhost
 EOF
 
     # Configure trusted hosts
@@ -205,7 +212,7 @@ EOF
     done
 
     # Configure OpenDKIM to run as a milter
-    sudo sed -i 's|SOCKET=local:\$RUNDIR/opendkim.sock|SOCKET=inet:12345@localhost|' /etc/default/opendkim
+    sudo sed -i 's|^SOCKET=.*|SOCKET="inet:12345@localhost"|' /etc/default/opendkim
 
     # Update Postfix main.cf to use OpenDKIM
     sudo postconf -e "milter_protocol = 2"
@@ -219,11 +226,19 @@ restart_services() {
     # Enable services to start on boot
     sudo systemctl enable saslauthd
     sudo systemctl enable postfix
-    sudo systemctl enable opendkim
+    if [ "$ENABLE_DKIM" = "yes" ]; then
+        sudo systemctl enable opendkim
+    else
+        sudo systemctl disable opendkim
+    fi
 
     # Restart services
     sudo service saslauthd restart
-    sudo service opendkim restart
+    if [ "$ENABLE_DKIM" = "yes" ]; then
+        sudo service opendkim restart
+    else
+        sudo service opendkim stop
+    fi
     sudo service postfix restart
 }
 
@@ -327,16 +342,29 @@ check_postfix_installed() {
 
 # Function to display menu if Postfix is already installed
 display_menu() {
-    echo "Postfix is already installed. What would you like to do?"
-    echo "1) Edit hostname"
-    echo "2) Add or edit SMTP users"
-    echo "3) Edit SMTP address preference"
-    echo "4) Edit DKIM configuration"
-    echo "5) Toggle DKIM on/off"
-    echo "6) Toggle 'Received' header removal"
-    echo "7) Quit"
-
     while true; do
+        echo
+        echo "Postfix is already installed. What would you like to do?"
+        echo "1) Edit hostname (current: $(postconf -h myhostname))"
+        echo "2) Add or edit SMTP users"
+        CURRENT_SMTP_PREF=$(postconf -h smtp_address_preference)
+        echo "3) Edit SMTP address preference (current: ${CURRENT_SMTP_PREF})"
+        if systemctl is-enabled opendkim &> /dev/null; then
+            DKIM_STATUS="enabled"
+        else
+            DKIM_STATUS="disabled"
+        fi
+        echo "4) Edit DKIM configuration"
+        echo "5) Toggle DKIM on/off (currently: ${DKIM_STATUS})"
+        CURRENT_HEADER_SETTING=$(postconf -h header_checks 2>/dev/null)
+        if [ "$CURRENT_HEADER_SETTING" = "regexp:/etc/postfix/header_checks" ]; then
+            HEADER_STATUS="enabled"
+        else
+            HEADER_STATUS="disabled"
+        fi
+        echo "6) Toggle 'Received' header removal (currently: ${HEADER_STATUS})"
+        echo "7) Quit"
+
         read -p "Enter your choice [1-7]: " CHOICE
         case "$CHOICE" in
             1)
@@ -376,7 +404,7 @@ display_menu() {
                 fi
                 ;;
             6)
-                if [ "$REMOVE_HEADER" = "yes" ]; then
+                if [ "$HEADER_STATUS" = "enabled" ]; then
                     REMOVE_HEADER="no"
                 else
                     REMOVE_HEADER="yes"
@@ -400,14 +428,6 @@ display_menu() {
         esac
         echo "Configuration updated. Restarting services..."
         restart_services
-        echo "What else would you like to do?"
-        echo "1) Edit hostname"
-        echo "2) Add or edit SMTP users"
-        echo "3) Edit SMTP address preference"
-        echo "4) Edit DKIM configuration"
-        echo "5) Toggle DKIM on/off"
-        echo "6) Toggle 'Received' header removal"
-        echo "7) Quit"
     done
 }
 
