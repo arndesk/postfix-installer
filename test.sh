@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This script installs and configures Postfix as an SMTP server with authentication on port 587.
+# This script installs and configures Exim4 as an SMTP server with authentication on port 587.
 # It sets up SMTP authentication for use with Nodemailer.
 # If the script is run multiple times, it provides options to edit configurations.
 
@@ -46,16 +46,16 @@ prompt_hostname() {
 
 # Function to prompt for SMTP address preference
 prompt_smtp_pref() {
-    CURRENT_SMTP_PREF=$(postconf -h smtp_address_preference 2>/dev/null || echo "ipv4")
+    CURRENT_SMTP_PREF=$(grep "^dc_ip_version" /etc/exim4/update-exim4.conf.conf 2>/dev/null | cut -d'"' -f2 || echo "ipv4")
     while true; do
-        read -p "Set smtp_address_preference (ipv6, ipv4, any) [${CURRENT_SMTP_PREF}]: " SMTP_PREF
+        read -p "Set SMTP address preference (ipv6, ipv4, all) [${CURRENT_SMTP_PREF}]: " SMTP_PREF
         SMTP_PREF=${SMTP_PREF:-$CURRENT_SMTP_PREF}
         case "$SMTP_PREF" in
-            ipv6|ipv4|any)
+            ipv6|ipv4|all)
                 break
                 ;;
             *)
-                echo "Invalid option. Please enter 'ipv6', 'ipv4', or 'any'."
+                echo "Invalid option. Please enter 'ipv6', 'ipv4', or 'all'."
                 ;;
         esac
     done
@@ -63,8 +63,8 @@ prompt_smtp_pref() {
 
 # Function to prompt for removing Received header
 prompt_remove_header() {
-    CURRENT_HEADER_SETTING=$(postconf -h header_checks 2>/dev/null)
-    if [ "$CURRENT_HEADER_SETTING" = "regexp:/etc/postfix/header_checks" ]; then
+    CURRENT_REMOVE_HEADER=$(grep "received_header_text" /etc/exim4/exim4.conf.localmacros 2>/dev/null)
+    if [ -n "$CURRENT_REMOVE_HEADER" ]; then
         CURRENT_REMOVE_HEADER="yes"
     else
         CURRENT_REMOVE_HEADER="no"
@@ -80,7 +80,7 @@ prompt_remove_header() {
             *)
                 echo "Please answer yes or no."
                 ;;
-        esac  # Added 'esac' to close the 'case' statement
+        esac
     done
 }
 
@@ -106,96 +106,86 @@ prompt_smtp_credentials() {
 
 # Function to restart services
 restart_services() {
-    # Enable services to start on boot
-    sudo systemctl enable saslauthd
-    sudo systemctl enable postfix
-
     # Restart services
-    sudo service saslauthd restart
-    sudo service postfix restart
+    sudo service exim4 restart
 }
 
-# Function to configure Postfix
-configure_postfix() {
+# Function to configure Exim4
+configure_exim4() {
     # Update system packages
     sudo apt-get update
 
-    # Install postfix and necessary packages
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix sasl2-bin libsasl2-modules
+    # Install Exim4 and necessary packages
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y exim4
 
-    # Stop postfix service during configuration
-    sudo service postfix stop
+    # Stop Exim4 service during configuration
+    sudo service exim4 stop
 
-    # Configure postfix main.cf
-    sudo postconf -e "smtpd_banner = \$myhostname ESMTP"
-    sudo postconf -e "myhostname = $HOSTNAME"
-    sudo postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost"
-    sudo postconf -e "relayhost ="
-    sudo postconf -e "inet_interfaces = all"
-    sudo postconf -e "inet_protocols = all"
-    sudo postconf -e "smtpd_sasl_auth_enable = yes"
-    sudo postconf -e "smtpd_sasl_security_options = noanonymous"
-    sudo postconf -e "smtpd_sasl_local_domain = \$myhostname"
-    sudo postconf -e "smtpd_recipient_restrictions = permit_sasl_authenticated, permit_mynetworks, reject_unauth_destination"
-    sudo postconf -e "broken_sasl_auth_clients = yes"
-    sudo postconf -e "smtpd_tls_security_level = may"
-    sudo postconf -e "smtp_tls_security_level = may"
-    sudo postconf -e "smtp_tls_note_starttls_offer = yes"
-    sudo postconf -e "smtpd_tls_auth_only = no"
-    sudo postconf -e "smtpd_sasl_type = cyrus"
-    sudo postconf -e "smtpd_sasl_path = smtpd"
+    # Configure Exim4
+    sudo cp /etc/exim4/update-exim4.conf.conf /etc/exim4/update-exim4.conf.conf.backup
 
-    # Set smtp_address_preference
-    sudo postconf -e "smtp_address_preference = $SMTP_PREF"
+    # Set the main configuration parameters
+    sudo sed -i "s/^dc_eximconfig_configtype=.*/dc_eximconfig_configtype='internet'/g" /etc/exim4/update-exim4.conf.conf
+    sudo sed -i "s/^dc_other_hostnames=.*/dc_other_hostnames='$HOSTNAME'/g" /etc/exim4/update-exim4.conf.conf
+    sudo sed -i "s/^dc_local_interfaces=.*/dc_local_interfaces='127.0.0.1 ; ::1 ; 0.0.0.0 ; [::0]'/g" /etc/exim4/update-exim4.conf.conf
 
-    # Configure Postfix to listen on port 587
-    # Remove any existing submission configurations to prevent duplication
-    sudo sed -i '/^submission inet n.*smtpd$/,/^$/d' /etc/postfix/master.cf
+    # Set SMTP address preference
+    sudo sed -i "s/^dc_ip_version=.*/dc_ip_version='$SMTP_PREF'/g" /etc/exim4/update-exim4.conf.conf
 
-    # Add the submission configuration
-    echo "submission inet n       -       n       -       -       smtpd
-  -o syslog_name=postfix/submission
-  -o smtpd_tls_security_level=encrypt
-  -o smtpd_sasl_auth_enable=yes
-  -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
-  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject" | sudo tee -a /etc/postfix/master.cf
+    # Configure Exim4 to listen on port 587
+    echo "daemon_smtp_ports = 25 : 587" | sudo tee -a /etc/exim4/exim4.conf.localmacros
 
-    # Ensure no milters are configured
-    sudo postconf -e "smtpd_milters ="
-    sudo postconf -e "non_smtpd_milters ="
+    # Enable TLS (Let's assume we want to support TLS)
+    # For simplicity, we will generate a self-signed certificate
+    sudo openssl req -new -x509 -nodes -days 365 -subj "/CN=$HOSTNAME" -out /etc/ssl/certs/exim.crt -keyout /etc/ssl/private/exim.key
+    sudo chmod 640 /etc/ssl/private/exim.key
+    sudo chown root:Debian-exim /etc/ssl/private/exim.key
 
-    # Enable and configure Cyrus SASL
-    sudo sed -i 's/^START=no/START=yes/' /etc/default/saslauthd
-    sudo sed -i 's/^MECHANISMS=".*"/MECHANISMS="sasldb"/' /etc/default/saslauthd
-    sudo sed -i 's|^OPTIONS="-c"|OPTIONS="-c -m /var/spool/postfix/var/run/saslauthd"|' /etc/default/saslauthd
+    echo "MAIN_TLS_ENABLE = yes" | sudo tee -a /etc/exim4/exim4.conf.localmacros
+    echo "tls_certificate = /etc/ssl/certs/exim.crt" | sudo tee -a /etc/exim4/exim4.conf.localmacros
+    echo "tls_privatekey = /etc/ssl/private/exim.key" | sudo tee -a /etc/exim4/exim4.conf.localmacros
 
-    sudo mkdir -p /var/spool/postfix/var/run/saslauthd
-    sudo rm -rf /var/run/saslauthd
-    sudo ln -s /var/spool/postfix/var/run/saslauthd /var/run/saslauthd
+    # Enable SMTP authentication
+    echo "AUTH_CLIENT_ALLOW_NOTLS_PASSWORDS = yes" | sudo tee -a /etc/exim4/exim4.conf.localmacros
 
-    sudo adduser postfix sasl
+    # Set up authentication
+    # We will use a plaintext file for authentication (/etc/exim4/passwd)
+    sudo touch /etc/exim4/passwd
+    sudo chmod 640 /etc/exim4/passwd
+    sudo chown root:Debian-exim /etc/exim4/passwd
 
-    # Create the user in sasldb2
-    echo "$PASSWORD" | sudo saslpasswd2 -c "$USERNAME" -p
-    sudo chown postfix:postfix /etc/sasldb2
-    sudo chmod 660 /etc/sasldb2
+    # Add the user to the passwd file
+    echo "$USERNAME:$PASSWORD" | sudo tee -a /etc/exim4/passwd
 
-    # Configure Received header removal if user opted in
+    # Configure Exim to use the authentication file
+    sudo tee /etc/exim4/conf.d/auth/30_exim4_config_local <<< '
+plain_login:
+  driver = plaintext
+  public_name = LOGIN
+  server_prompts = Username:: : Password::
+  server_condition = "${if eq{$auth2}{${lookup{$auth1}lsearch{/etc/exim4/passwd}{$value}{*}}}{yes}{no}}"
+  server_set_id = $auth1
+'
+
+    # Remove 'Received' headers if requested
     if [ "$REMOVE_HEADER" = "yes" ]; then
-        echo "Setting up to remove 'Received' headers from outgoing emails..."
-        sudo postconf -e "header_checks = regexp:/etc/postfix/header_checks"
-        echo "/^Received:/     IGNORE" | sudo tee /etc/postfix/header_checks
+        echo "received_header_text = " | sudo tee -a /etc/exim4/exim4.conf.localmacros
     else
-        # Ensure header_checks is not set if user chooses not to remove headers
-        sudo postconf -e "header_checks ="
-        sudo rm -f /etc/postfix/header_checks
+        # Ensure 'received_header_text' is not set
+        sudo sed -i '/^received_header_text/d' /etc/exim4/exim4.conf.localmacros
     fi
+
+    # Update Exim configuration
+    sudo update-exim4.conf
+
+    # Start Exim4 service
+    sudo service exim4 start
 }
 
 # Function to display SMTP credentials
 display_credentials() {
     echo
-    echo "Postfix has been installed and configured."
+    echo "Exim4 has been installed and configured."
     echo
     echo "SMTP Credentials:"
     echo "Host: $HOSTNAME"
@@ -206,27 +196,27 @@ display_credentials() {
     echo "You can now use these SMTP details in Nodemailer."
 }
 
-# Function to check if Postfix is already installed
-check_postfix_installed() {
-    dpkg -s postfix &> /dev/null
+# Function to check if Exim4 is already installed
+check_exim_installed() {
+    dpkg -s exim4 &> /dev/null
     if [ $? -eq 0 ]; then
-        POSTFIX_INSTALLED="yes"
+        EXIM_INSTALLED="yes"
     else
-        POSTFIX_INSTALLED="no"
+        EXIM_INSTALLED="no"
     fi
 }
 
-# Function to display menu if Postfix is already installed
+# Function to display menu if Exim is already installed
 display_menu() {
     while true; do
         echo
-        echo "Postfix is already installed. What would you like to do?"
-        echo "1) Edit hostname (current: $(postconf -h myhostname))"
+        echo "Exim4 is already installed. What would you like to do?"
+        echo "1) Edit hostname (current: $(hostname))"
         echo "2) Add or edit SMTP users"
-        CURRENT_SMTP_PREF=$(postconf -h smtp_address_preference)
+        CURRENT_SMTP_PREF=$(grep "^dc_ip_version" /etc/exim4/update-exim4.conf.conf | cut -d'"' -f2)
         echo "3) Edit SMTP address preference (current: ${CURRENT_SMTP_PREF})"
-        CURRENT_HEADER_SETTING=$(postconf -h header_checks 2>/dev/null)
-        if [ "$CURRENT_HEADER_SETTING" = "regexp:/etc/postfix/header_checks" ]; then
+        CURRENT_HEADER_SETTING=$(grep "received_header_text" /etc/exim4/exim4.conf.localmacros 2>/dev/null)
+        if [ -n "$CURRENT_HEADER_SETTING" ]; then
             HEADER_STATUS="enabled"
         else
             HEADER_STATUS="disabled"
@@ -238,18 +228,19 @@ display_menu() {
         case "$CHOICE" in
             1)
                 prompt_hostname
-                sudo postconf -e "myhostname = $HOSTNAME"
+                sudo sed -i "s/^dc_other_hostnames=.*/dc_other_hostnames='$HOSTNAME'/g" /etc/exim4/update-exim4.conf.conf
+                sudo update-exim4.conf
                 ;;
             2)
                 prompt_smtp_credentials
-                # Create or update the user in sasldb2
-                echo "$PASSWORD" | sudo saslpasswd2 -c "$USERNAME" -p
-                sudo chown postfix:postfix /etc/sasldb2
-                sudo chmod 660 /etc/sasldb2
+                # Create or update the user in passwd file
+                sudo sed -i "/^$USERNAME:/d" /etc/exim4/passwd
+                echo "$USERNAME:$PASSWORD" | sudo tee -a /etc/exim4/passwd
                 ;;
             3)
                 prompt_smtp_pref
-                sudo postconf -e "smtp_address_preference = $SMTP_PREF"
+                sudo sed -i "s/^dc_ip_version=.*/dc_ip_version='$SMTP_PREF'/g" /etc/exim4/update-exim4.conf.conf
+                sudo update-exim4.conf
                 ;;
             4)
                 if [ "$HEADER_STATUS" = "enabled" ]; then
@@ -260,11 +251,9 @@ display_menu() {
                 prompt_remove_header
                 # Reconfigure header removal
                 if [ "$REMOVE_HEADER" = "yes" ]; then
-                    sudo postconf -e "header_checks = regexp:/etc/postfix/header_checks"
-                    echo "/^Received:/     IGNORE" | sudo tee /etc/postfix/header_checks
+                    echo "received_header_text = " | sudo tee -a /etc/exim4/exim4.conf.localmacros
                 else
-                    sudo postconf -e "header_checks ="
-                    sudo rm -f /etc/postfix/header_checks
+                    sudo sed -i '/^received_header_text/d' /etc/exim4/exim4.conf.localmacros
                 fi
                 ;;
             5)
@@ -284,9 +273,9 @@ display_menu() {
 get_public_ip
 get_rdns
 
-check_postfix_installed
+check_exim_installed
 
-if [ "$POSTFIX_INSTALLED" = "yes" ]; then
+if [ "$EXIM_INSTALLED" = "yes" ]; then
     display_menu
 else
     # First-time installation
@@ -295,7 +284,7 @@ else
     prompt_remove_header
     prompt_smtp_credentials
 
-    configure_postfix
+    configure_exim4
 
     restart_services
     display_credentials
