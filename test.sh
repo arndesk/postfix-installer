@@ -58,7 +58,7 @@ prompt_smtp_pref() {
                 echo "Invalid option. Please enter 'ipv6', 'ipv4', or 'any'."
                 ;;
         esac
-    fi
+    done
 }
 
 # Function to prompt for removing Received header
@@ -80,7 +80,7 @@ prompt_remove_header() {
             *)
                 echo "Please answer yes or no."
                 ;;
-        esac
+        esac  # Added 'esac' to close the 'case' statement
     done
 }
 
