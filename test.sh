@@ -1,73 +1,27 @@
 #!/bin/bash
 
 # This script installs and configures Postfix as an SMTP server with authentication on port 587.
-# It also sets up multiple MTAs and routes emails based on the "X-VMTA" header.
+# It sets up multiple virtual MTAs with IPv6 addresses and hostnames.
 
-set -e
+# Install necessary tools
+sudo apt-get install -y dnsutils curl
 
-# Function to install necessary tools
-install_tools() {
-    sudo apt-get update
-    sudo apt-get install -y dnsutils curl postfix sasl2-bin libsasl2-modules
-}
+# Function to prompt for virtual MTA configuration
+prompt_vmta_config() {
+    echo "Enter the virtual MTA configurations in the following format:"
+    echo "[mta_name]"
+    echo "ip = IPv6_address"
+    echo "host = hostname"
+    echo "Enter an empty line when finished."
 
-# Function to get the server's public IP
-get_public_ip() {
-    PUBLIC_IP=$(curl -s ifconfig.me)
-    if [ -z "$PUBLIC_IP" ]; then
-        echo "Could not retrieve public IP address."
-        exit 1
-    fi
-    echo "Public IP: $PUBLIC_IP"
-}
-
-# Function to get reverse DNS of the public IP
-get_rdns() {
-    RDNS=$(dig -x "$PUBLIC_IP" +short | sed 's/\.$//')
-    if [ -z "$RDNS" ]; then
-        echo "Could not retrieve reverse DNS of the public IP."
-        RDNS=""
-    else
-        echo "Reverse DNS: $RDNS"
-    fi
-}
-
-# Function to prompt for hostname
-prompt_hostname() {
-    if [ -z "$RDNS" ]; then
-        echo "Reverse DNS not found. Please enter the hostname."
-        while true; do
-            read -p "Enter the hostname: " HOSTNAME
-            if [ -n "$HOSTNAME" ]; then
-                break
-            else
-                echo "Hostname cannot be empty. Please enter a valid hostname."
-            fi
-        done
-    else
-        # Prompt for hostname with auto-fill from RDNS and allow editing
-        read -e -p "Enter the hostname [${RDNS}]: " HOSTNAME
-        HOSTNAME=${HOSTNAME:-$RDNS}
-    fi
-    echo "Hostname set to: $HOSTNAME"
-}
-
-# Function to prompt for SMTP address preference
-prompt_smtp_pref() {
-    CURRENT_SMTP_PREF=$(postconf -h smtp_address_preference 2>/dev/null || echo "ipv4")
-    while true; do
-        read -p "Set smtp_address_preference (ipv6, ipv4, any) [${CURRENT_SMTP_PREF}]: " SMTP_PREF
-        SMTP_PREF=${SMTP_PREF:-$CURRENT_SMTP_PREF}
-        case "$SMTP_PREF" in
-            ipv6|ipv4|any)
-                break
-                ;;
-            *)
-                echo "Invalid option. Please enter 'ipv6', 'ipv4', or 'any'."
-                ;;
-        esac
+    VMTA_CONFIG=""
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && break
+        VMTA_CONFIG+="$line"$'\n'
     done
-    echo "SMTP address preference set to: $SMTP_PREF"
+
+    # Save the configuration to a file
+    echo "$VMTA_CONFIG" | sudo tee /etc/postfix/vmta_config
 }
 
 # Function to prompt for removing Received header
@@ -91,15 +45,12 @@ prompt_remove_header() {
                 ;;
         esac
     done
-    echo "'Received' header removal set to: $REMOVE_HEADER"
 }
 
 # Function to prompt for SMTP authentication credentials
 prompt_smtp_credentials() {
-    # Prompt for username
     read -p "Enter the username for SMTP authentication: " USERNAME
 
-    # Prompt for password with confirmation (Visible Input)
     while true; do
         read -p "Enter the password for SMTP authentication: " PASSWORD1
         echo
@@ -112,32 +63,29 @@ prompt_smtp_credentials() {
             echo "Passwords do not match. Please try again."
         fi
     done
-    echo "SMTP credentials set for user: $USERNAME"
 }
 
 # Function to restart services
 restart_services() {
-    # Enable services to start on boot
     sudo systemctl enable saslauthd
     sudo systemctl enable postfix
-
-    # Restart services
     sudo service saslauthd restart
     sudo service postfix restart
 }
 
 # Function to configure Postfix
 configure_postfix() {
-    # Stop postfix service during configuration
+    sudo apt-get update
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postfix sasl2-bin libsasl2-modules
+
     sudo service postfix stop
 
     # Configure postfix main.cf
     sudo postconf -e "smtpd_banner = \$myhostname ESMTP"
-    sudo postconf -e "myhostname = $HOSTNAME"
-    sudo postconf -e "mydestination = \$myhostname, localhost.\$mydomain, localhost"
+    sudo postconf -e "mydestination = localhost"
     sudo postconf -e "relayhost ="
     sudo postconf -e "inet_interfaces = all"
-    sudo postconf -e "inet_protocols = all"
+    sudo postconf -e "inet_protocols = ipv6"
     sudo postconf -e "smtpd_sasl_auth_enable = yes"
     sudo postconf -e "smtpd_sasl_security_options = noanonymous"
     sudo postconf -e "smtpd_sasl_local_domain = \$myhostname"
@@ -150,20 +98,40 @@ configure_postfix() {
     sudo postconf -e "smtpd_sasl_type = cyrus"
     sudo postconf -e "smtpd_sasl_path = smtpd"
 
-    # Set smtp_address_preference
-    sudo postconf -e "smtp_address_preference = $SMTP_PREF"
+    # Configure virtual MTAs
+    sudo postconf -e "sender_dependent_default_transport_maps = regexp:/etc/postfix/vmta_transport"
+    sudo postconf -e "smtp_header_checks = regexp:/etc/postfix/vmta_header_checks"
+
+    # Create vmta_transport file
+    echo "/.+/ smtp:[127.0.0.1]:10001" | sudo tee /etc/postfix/vmta_transport
+
+    # Create vmta_header_checks file
+    echo '/^x-vmta:/i FILTER smtp:[127.0.0.1]:10001' | sudo tee /etc/postfix/vmta_header_checks
 
     # Configure Postfix to listen on port 587
-    # Remove any existing submission configurations to prevent duplication
     sudo sed -i '/^submission inet n.*smtpd$/,/^$/d' /etc/postfix/master.cf
 
-    # Add the submission configuration
     echo "submission inet n       -       n       -       -       smtpd
   -o syslog_name=postfix/submission
   -o smtpd_tls_security_level=encrypt
   -o smtpd_sasl_auth_enable=yes
   -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject" | sudo tee -a /etc/postfix/master.cf
+
+    # Add virtual MTA configurations to master.cf
+    while IFS= read -r line; do
+        if [[ $line =~ ^\[(.*)\]$ ]]; then
+            mta_name="${BASH_REMATCH[1]}"
+            read -r ip_line
+            read -r host_line
+            ip=$(echo "$ip_line" | cut -d'=' -f2 | tr -d '[:space:]')
+            host=$(echo "$host_line" | cut -d'=' -f2 | tr -d '[:space:]')
+
+            echo "${mta_name} unix  -       -       n       -       -       smtp
+    -o smtp_bind_address6=${ip}
+    -o smtp_helo_name=${host}" | sudo tee -a /etc/postfix/master.cf
+        fi
+    done < /etc/postfix/vmta_config
 
     # Ensure no milters are configured
     sudo postconf -e "smtpd_milters ="
@@ -191,7 +159,6 @@ configure_postfix() {
         sudo postconf -e "header_checks = regexp:/etc/postfix/header_checks"
         echo "/^Received:/     IGNORE" | sudo tee /etc/postfix/header_checks
     else
-        # Ensure header_checks is not set if user chooses not to remove headers
         sudo postconf -e "header_checks ="
         sudo rm -f /etc/postfix/header_checks
     fi
@@ -200,15 +167,20 @@ configure_postfix() {
 # Function to display SMTP credentials
 display_credentials() {
     echo
-    echo "Postfix has been installed and configured."
+    echo "Postfix has been installed and configured with virtual MTAs."
     echo
     echo "SMTP Credentials:"
-    echo "Host: $HOSTNAME"
     echo "Port: 587"
     echo "Username: $USERNAME"
     echo "Password: $PASSWORD"
     echo
-    echo "You can now use these SMTP details in Nodemailer."
+    echo "Virtual MTA Configuration:"
+    cat /etc/postfix/vmta_config
+    echo
+    echo "To use a specific virtual MTA, include the 'x-vmta' header in your email."
+    echo "Example: x-vmta: mta_name_1"
+    echo
+    echo "You can now use these SMTP details in your email sending application."
 }
 
 # Function to check if Postfix is already installed
@@ -226,38 +198,36 @@ display_menu() {
     while true; do
         echo
         echo "Postfix is already installed. What would you like to do?"
-        echo "1) Edit hostname (current: $(postconf -h myhostname))"
+        echo "1) Edit virtual MTA configuration"
         echo "2) Add or edit SMTP users"
-        echo "3) Edit SMTP address preference (current: $(postconf -h smtp_address_preference))"
-        echo "4) Toggle 'Received' header removal (currently: $( [ "$(postconf -h header_checks)" = "regexp:/etc/postfix/header_checks" ] && echo "enabled" || echo "disabled" ))"
-        echo "5) Configure MTAs for X-VMTA routing"
-        echo "6) Quit"
+        CURRENT_HEADER_SETTING=$(postconf -h header_checks 2>/dev/null)
+        if [ "$CURRENT_HEADER_SETTING" = "regexp:/etc/postfix/header_checks" ]; then
+            HEADER_STATUS="enabled"
+        else
+            HEADER_STATUS="disabled"
+        fi
+        echo "3) Toggle 'Received' header removal (currently: ${HEADER_STATUS})"
+        echo "4) Quit"
 
-        read -p "Enter your choice [1-6]: " CHOICE
+        read -p "Enter your choice [1-4]: " CHOICE
         case "$CHOICE" in
             1)
-                prompt_hostname
-                sudo postconf -e "myhostname = $HOSTNAME"
+                prompt_vmta_config
+                configure_postfix
                 ;;
             2)
                 prompt_smtp_credentials
-                # Create or update the user in sasldb2
                 echo "$PASSWORD" | sudo saslpasswd2 -c "$USERNAME" -p
                 sudo chown postfix:postfix /etc/sasldb2
                 sudo chmod 660 /etc/sasldb2
                 ;;
             3)
-                prompt_smtp_pref
-                sudo postconf -e "smtp_address_preference = $SMTP_PREF"
-                ;;
-            4)
-                if [ "$(postconf -h header_checks)" = "regexp:/etc/postfix/header_checks" ]; then
+                if [ "$HEADER_STATUS" = "enabled" ]; then
                     REMOVE_HEADER="no"
                 else
                     REMOVE_HEADER="yes"
                 fi
                 prompt_remove_header
-                # Reconfigure header removal
                 if [ "$REMOVE_HEADER" = "yes" ]; then
                     sudo postconf -e "header_checks = regexp:/etc/postfix/header_checks"
                     echo "/^Received:/     IGNORE" | sudo tee /etc/postfix/header_checks
@@ -266,10 +236,7 @@ display_menu() {
                     sudo rm -f /etc/postfix/header_checks
                 fi
                 ;;
-            5)
-                configure_mt_map
-                ;;
-            6)
+            4)
                 exit 0
                 ;;
             *)
@@ -281,123 +248,18 @@ display_menu() {
     done
 }
 
-# Function to configure MTAs for X-VMTA routing
-configure_mt_map() {
-    echo "Configuring MTAs for X-VMTA routing..."
-
-    # Prompt for number of MTAs
-    while true; do
-        read -p "Enter the number of MTAs you want to configure: " NUM_MTAS
-        if [[ "$NUM_MTAS" =~ ^[1-9][0-9]*$ ]]; then
-            break
-        else
-            echo "Please enter a valid positive integer."
-        fi
-    done
-
-    # Initialize MTA configurations
-    declare -A MTA_NAMES
-    declare -A MTA_IPS
-    declare -A MTA_HOSTS
-
-    for ((i=1; i<=NUM_MTAS; i++)); do
-        echo "Configuring MTA #$i:"
-        while true; do
-            read -p "Enter MTA name (e.g., mta_name_$i): " mta_name
-            if [[ "$mta_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-                break
-            else
-                echo "Invalid MTA name. Use only letters, numbers, underscores, or hyphens."
-            fi
-        done
-        read -p "Enter IP for $mta_name: " mta_ip
-        read -p "Enter hostname for $mta_name: " mta_host
-        MTA_NAMES["$mta_name"]="$mta_name"
-        MTA_IPS["$mta_name"]="$mta_ip"
-        MTA_HOSTS["$mta_name"]="$mta_host"
-    done
-
-    # Create transport map file
-    TRANSPORT_FILE="/etc/postfix/transport_xvmta"
-    sudo touch $TRANSPORT_FILE
-    sudo chmod 644 $TRANSPORT_FILE
-    sudo rm -f $TRANSPORT_FILE
-    sudo touch $TRANSPORT_FILE
-    sudo chmod 644 $TRANSPORT_FILE
-
-    echo "Configuring transport maps for each MTA..."
-
-    # Append transport entries based on X-VMTA header
-    for mta in "${!MTA_NAMES[@]}"; do
-        transport_name="xvmta_$mta"
-        # Define the transport with the specific relayhost
-        sudo postconf -e "transport_maps = hash:$TRANSPORT_FILE"
-
-        # Append transport definitions in master.cf
-        if ! grep -q "^$transport_name " /etc/postfix/master.cf; then
-            sudo bash -c "cat >> /etc/postfix/master.cf" <<EOL
-
-$transport_name unix -       -       n       -       -       smtp
-  -o smtp_bind_address=${MTA_IPS[$mta]}
-  -o smtp_helo_name=${MTA_HOSTS[$mta]}
-  -o relayhost=${MTA_HOSTS[$mta]}
-EOL
-        fi
-
-        # Add header_checks rule
-        echo "/^X-VMTA:\s*$mta\$/ FILTER $transport_name:" | sudo tee -a $TRANSPORT_FILE > /dev/null
-    done
-
-    # Compile transport map
-    sudo postmap $TRANSPORT_FILE
-
-    # Configure header_checks to use the transport map
-    sudo postconf -e "header_checks = regexp:/etc/postfix/header_checks_xvmta"
-
-    # Create header_checks_xvmta
-    HEADER_CHECKS_XVMTA="/etc/postfix/header_checks_xvmta"
-    sudo bash -c "cat > $HEADER_CHECKS_XVMTA" <<EOL
-/^X-VMTA:\s*(.+)$/ FILTER \${1}:
-EOL
-
-    sudo postconf -e "transport_maps = hash:$TRANSPORT_FILE"
-    echo "MTAs configured successfully."
-}
-
-# Function to prompt for and configure MTAs
-prompt_and_configure_mt_map() {
-    configure_mt_map
-    echo "Restarting services to apply MTA configurations..."
-    restart_services
-}
-
 # Main script execution
 
 check_postfix_installed
 
 if [ "$POSTFIX_INSTALLED" = "yes" ]; then
-    echo "Postfix is already installed."
     display_menu
 else
-    # First-time installation
-    install_tools
-    get_public_ip
-    get_rdns
-    prompt_hostname
-    prompt_smtp_pref
+    prompt_vmta_config
     prompt_remove_header
     prompt_smtp_credentials
 
     configure_postfix
-
-    # Prompt to configure MTAs
-    echo
-    read -p "Do you want to configure MTAs for X-VMTA routing? (yes/no) [yes]: " CONFIGURE_MTA
-    CONFIGURE_MTA=${CONFIGURE_MTA,,}
-    CONFIGURE_MTA=${CONFIGURE_MTA:-yes}
-    if [ "$CONFIGURE_MTA" = "yes" ]; then
-        prompt_and_configure_mt_map
-    fi
 
     restart_services
     display_credentials
