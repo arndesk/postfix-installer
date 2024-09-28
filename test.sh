@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Enhanced Postfix Installation Script with Multiple MTA Support
+# Enhanced Postfix Installation Script
 # This script installs and configures Postfix as an SMTP server with authentication on port 587.
-# It allows configuring multiple MTAs with custom headers and provides options to manage them.
+# It allows managing SMTP credentials and multiple MTAs with custom headers.
 
 # Exit immediately if a command exits with a non-zero status
 set -e
@@ -117,7 +117,7 @@ prompt_smtp_credentials() {
         fi
     done
 
-    # Prompt for password with confirmation (Visible Input)
+    # Prompt for password with confirmation (Hidden Input)
     while true; do
         read -s -p "Enter the password for SMTP authentication: " PASSWORD1
         echo
@@ -137,7 +137,7 @@ prompt_smtp_credentials() {
 load_mtas() {
     if [ ! -f "$MTA_CONFIG_FILE" ]; then
         echo "MTA configuration file not found. Creating a new one..."
-        touch "$MTA_CONFIG_FILE"
+        sudo touch "$MTA_CONFIG_FILE"
     fi
 
     MTAS=()
@@ -155,6 +155,11 @@ load_mtas() {
             MTA_HOSTS["$CURRENT_MTA"]=${BASH_REMATCH[1]}
         fi
     done < "$MTA_CONFIG_FILE"
+
+    # Export associative arrays for use in other functions
+    export MTAS
+    declare -p MTA_IPS >/dev/null && unset MTA_IPS
+    declare -p MTA_HOSTS >/dev/null && unset MTA_HOSTS
 }
 
 # Function to add or edit MTA configurations
@@ -242,7 +247,7 @@ add_mta() {
         echo "ip = $NEW_IP"
         echo "host = $NEW_HOST"
         echo
-    } >> "$MTA_CONFIG_FILE"
+    } | sudo tee -a "$MTA_CONFIG_FILE" > /dev/null
 
     echo "MTA $NEW_MTA added successfully."
     load_mtas
@@ -250,6 +255,7 @@ add_mta() {
 
 # Function to edit an existing MTA
 edit_mta() {
+    load_mtas
     if [ ${#MTAS[@]} -eq 0 ]; then
         echo "No MTAs to edit."
         return
@@ -257,9 +263,10 @@ edit_mta() {
 
     echo "Select the MTA you want to edit:"
     select SELECTED_MTA in "${MTAS[@]}" "Cancel"; do
-        if [ "$REPLY" -le "${#MTAS[@]}" ] && [ "$REPLY" -ge 1 ]; then
+        if [[ " ${MTAS[@]} " =~ " ${SELECTED_MTA} " ]]; then
             break
         elif [ "$SELECTED_MTA" = "Cancel" ]; then
+            echo "Edit operation cancelled."
             return
         else
             echo "Invalid selection."
@@ -303,8 +310,8 @@ edit_mta() {
         }
         print $0
     }
-    ' "$MTA_CONFIG_FILE.bak" > "$MTA_CONFIG_FILE"
-    rm "${MTA_CONFIG_FILE}.bak"
+    ' "$MTA_CONFIG_FILE.bak" | sudo tee "$MTA_CONFIG_FILE" > /dev/null
+    sudo rm "${MTA_CONFIG_FILE}.bak"
 
     echo "MTA $SELECTED_MTA updated successfully."
     load_mtas
@@ -312,6 +319,7 @@ edit_mta() {
 
 # Function to delete an MTA
 delete_mta() {
+    load_mtas
     if [ ${#MTAS[@]} -eq 0 ]; then
         echo "No MTAs to delete."
         return
@@ -319,9 +327,10 @@ delete_mta() {
 
     echo "Select the MTA you want to delete:"
     select SELECTED_MTA in "${MTAS[@]}" "Cancel"; do
-        if [ "$REPLY" -le "${#MTAS[@]}" ] && [ "$REPLY" -ge 1 ]; then
+        if [[ " ${MTAS[@]} " =~ " ${SELECTED_MTA} " ]]; then
             break
         elif [ "$SELECTED_MTA" = "Cancel" ]; then
+            echo "Delete operation cancelled."
             return
         else
             echo "Invalid selection."
@@ -338,8 +347,8 @@ delete_mta() {
         current == mta {skip=1; next}
         /^\[.*\]$/ {if (current == mta) {skip=1} else {skip=0}}
         { if (!skip) print }
-        ' "$MTA_CONFIG_FILE.bak" > "$MTA_CONFIG_FILE"
-        rm "${MTA_CONFIG_FILE}.bak"
+        ' "$MTA_CONFIG_FILE.bak" | sudo tee "$MTA_CONFIG_FILE" > /dev/null
+        sudo rm "${MTA_CONFIG_FILE}.bak"
         echo "MTA $SELECTED_MTA deleted successfully."
         load_mtas
     else
@@ -424,7 +433,9 @@ EOL
     if [ "$REMOVE_HEADER" = "yes" ]; then
         echo "Setting up to remove 'Received' headers from outgoing emails..."
         sudo postconf -e "header_checks = regexp:/etc/postfix/header_checks"
-        echo "/^Received:/     IGNORE" | sudo tee "$HEADER_CHECKS_FILE"
+        sudo tee "$HEADER_CHECKS_FILE" > /dev/null <<EOL
+/^Received:/     IGNORE
+EOL
     else
         # Ensure header_checks is not set if user chooses not to remove headers
         sudo postconf -e "header_checks ="
@@ -432,9 +443,11 @@ EOL
     fi
 
     # Configure transport maps for MTAs
-    if [ -f "$MTA_CONFIG_FILE" ]; then
+    if [ -s "$MTA_CONFIG_FILE" ]; then
         echo "Configuring transport maps for MTAs..."
-        > "$TRANSPORT_MAP_FILE" # Clear existing transport map
+        sudo tee "$TRANSPORT_MAP_FILE" > /dev/null <<EOL
+# Transport map for MTAs
+EOL
 
         while IFS= read -r line || [ -n "$line" ]; do
             if [[ $line =~ ^\[(.*)\]$ ]]; then
@@ -450,11 +463,12 @@ EOL
         sudo postmap "$TRANSPORT_MAP_FILE"
         sudo postconf -e "transport_maps = hash:$TRANSPORT_MAP_FILE"
     else
-        echo "No MTA configurations found."
+        echo "No MTAs configured."
+        sudo postconf -e "transport_maps ="
     fi
 
     # Configure header_checks to handle X-MTA-Name if transport_maps are set
-    if [ -f "$TRANSPORT_MAP_FILE" ]; then
+    if [ -s "$TRANSPORT_MAP_FILE" ]; then
         echo "Configuring header_checks for X-MTA-Name..."
         sudo tee "$HEADER_CHECKS_FILE" > /dev/null <<EOL
 /^X-MTA-Name: (.+)/ FILTER smtp:[\1]
@@ -462,9 +476,6 @@ EOL
 EOL
         sudo postconf -e "header_checks = regexp:$HEADER_CHECKS_FILE"
     fi
-
-    # Remove any existing X-MTA-Name headers from emails
-    sudo postconf -e "always_add_missing_headers = yes"
 }
 
 # Function to display SMTP credentials
@@ -501,10 +512,9 @@ display_menu() {
         echo "3) Edit SMTP address preference (current: $(postconf -h smtp_address_preference))"
         echo "4) Toggle 'Received' header removal (currently: $(postconf -h header_checks | grep -q "/etc/postfix/header_checks" && echo "enabled" || echo "disabled"))"
         echo "5) Manage MTAs"
-        echo "6) Add sender-dependent transport"
-        echo "7) Quit"
+        echo "6) Quit"
 
-        read -p "Enter your choice [1-7]: " CHOICE
+        read -p "Enter your choice [1-6]: " CHOICE
         case "$CHOICE" in
             1)
                 prompt_hostname
@@ -532,7 +542,9 @@ display_menu() {
                 # Reconfigure header removal
                 if [ "$REMOVE_HEADER" = "yes" ]; then
                     sudo postconf -e "header_checks = regexp:/etc/postfix/header_checks"
-                    echo "/^Received:/     IGNORE" | sudo tee "$HEADER_CHECKS_FILE"
+                    sudo tee "$HEADER_CHECKS_FILE" > /dev/null <<EOL
+/^Received:/     IGNORE
+EOL
                 else
                     sudo postconf -e "header_checks ="
                     sudo rm -f "$HEADER_CHECKS_FILE"
@@ -543,9 +555,6 @@ display_menu() {
                 configure_postfix
                 ;;
             6)
-                add_sender_transport
-                ;;
-            7)
                 echo "Exiting..."
                 exit 0
                 ;;
@@ -558,27 +567,16 @@ display_menu() {
     done
 }
 
-# Function to add sender-dependent transport
-add_sender_transport() {
-    echo "Adding sender-dependent transport..."
-    read -p "Enter the sender email address: " SENDER_EMAIL
-    echo "Available MTAs:"
-    load_mtas
-    select MTA in "${MTAS[@]}" "Cancel"; do
-        if [[ " ${MTAS[@]} " =~ " ${MTA} " ]]; then
-            break
-        elif [ "$MTA" = "Cancel" ]; then
-            echo "Operation cancelled."
-            return
-        else
-            echo "Invalid selection."
-        fi
-    done
-    MTA_IP=${MTA_IPS[$MTA]}
-    echo "$SENDER_EMAIL smtp:[${MTA_IP}]" | sudo tee -a "$SENDER_TRANSPORT_FILE" > /dev/null
-    sudo postmap "$SENDER_TRANSPORT_FILE"
-    sudo postconf -e "sender_dependent_transport_maps = hash:$SENDER_TRANSPORT_FILE"
-    echo "Sender-dependent transport added successfully."
+# Function to remove X-MTA-Name header before sending (Optional)
+remove_custom_header() {
+    # This function can be expanded if additional header removals are needed
+    :
+}
+
+# Function to configure sender-dependent transport maps (Optional)
+configure_sender_transport() {
+    # Future implementation if needed
+    :
 }
 
 # Main script execution
@@ -599,7 +597,7 @@ main() {
 
         # Initialize MTA configuration file if it doesn't exist
         if [ ! -f "$MTA_CONFIG_FILE" ]; then
-            touch "$MTA_CONFIG_FILE"
+            sudo touch "$MTA_CONFIG_FILE"
         fi
 
         # Prompt user to input MTA configurations
