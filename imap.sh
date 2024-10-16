@@ -3,7 +3,7 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
-# Function to print messages
+# Function to print messages with timestamp
 log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
 }
@@ -60,6 +60,13 @@ install_mailserver() {
     if ! dpkg -l | grep -qw postfix; then
         # Prompt for hostname during installation
         read -p "Enter the hostname for your mail server (e.g., mail.example.com): " mail_hostname
+
+        # Validate hostname format
+        if [[ ! "$mail_hostname" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            log "Invalid hostname format."
+            exit 1
+        fi
+
         hostnamectl set-hostname "$mail_hostname"
 
         # Preconfigure Postfix before installation
@@ -184,12 +191,7 @@ EOL
         systemctl restart postfix
         systemctl restart dovecot
 
-        # Open necessary firewall ports
-        log "Configuring firewall..."
-        ufw allow 25/tcp    # SMTP
-        ufw allow 587/tcp   # Submission
-        ufw allow 993/tcp   # IMAPS
-        ufw reload
+        log "Mail server setup is complete."
     else
         log "Postfix is already installed. Skipping initial setup."
     fi
@@ -288,6 +290,10 @@ add_redirect_domain() {
     # List existing mailboxes
     echo "Available mailboxes to redirect to:"
     mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
+    if [ -z "$mailboxes" ]; then
+        log "No mailboxes found. Please add a mailbox first."
+        return
+    fi
     select forward_to in $mailboxes; do
         if [ -n "$forward_to" ]; then
             echo "@$redirect_domain    $forward_to" >> /etc/postfix/virtual
@@ -304,6 +310,75 @@ add_redirect_domain() {
     systemctl restart postfix
 }
 
+# Function to bulk add redirect domains
+bulk_add_redirect_domains() {
+    read -p "Enter the target mailbox for all redirect domains (e.g., user@example.com): " target_mailbox
+    # Validate target mailbox format
+    if [[ ! "$target_mailbox" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+        log "Invalid email address format."
+        return
+    fi
+
+    # Check if target mailbox exists
+    if ! grep -qw "^$target_mailbox:" /etc/dovecot/users; then
+        log "Target mailbox $target_mailbox does not exist. Please add it first."
+        return
+    fi
+
+    log "Enter the list of redirect domains, one per line. Press ENTER on an empty line to finish:"
+    redirect_domains=()
+    while true; do
+        read -p "Redirect Domain: " domain
+        if [ -z "$domain" ]; then
+            break
+        fi
+        # Validate domain format
+        if [[ ! "$domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            log "Invalid domain format: $domain. Skipping."
+            continue
+        fi
+        redirect_domains+=("$domain")
+    done
+
+    if [ ${#redirect_domains[@]} -eq 0 ]; then
+        log "No valid redirect domains entered."
+        return
+    fi
+
+    for redirect_domain in "${redirect_domains[@]}"; do
+        # Check if redirect domain already exists
+        if grep -qw "^$redirect_domain" /etc/postfix/virtual_domains; then
+            log "Redirect domain $redirect_domain already exists. Updating forwarding address."
+            # Update the forwarding address in /etc/postfix/virtual
+            sed -i "s|^@$redirect_domain\s\+.*|@$redirect_domain    $target_mailbox|" /etc/postfix/virtual
+            log "Updated forwarding for $redirect_domain to $target_mailbox."
+        else
+            # Add redirect domain
+            echo "$redirect_domain" >> /etc/postfix/virtual_domains
+            # Update virtual_alias_domains
+            existing_alias_domains=$(postconf -h virtual_alias_domains)
+            if [ -z "$existing_alias_domains" ]; then
+                postconf -e "virtual_alias_domains = $redirect_domain"
+            else
+                postconf -e "virtual_alias_domains = $existing_alias_domains, $redirect_domain"
+            fi
+            log "Added $redirect_domain to virtual_alias_domains."
+            # Add forwarding entry
+            echo "@$redirect_domain    $target_mailbox" >> /etc/postfix/virtual
+            log "Added forwarding for $redirect_domain to $target_mailbox."
+        fi
+    done
+
+    # Regenerate Postfix virtual maps
+    postmap /etc/postfix/virtual
+
+    # Restart Postfix to apply changes
+    log "Restarting Postfix..."
+    systemctl restart postfix
+
+    log "Bulk redirect domains have been processed."
+}
+
 # Function to edit/delete a mailbox
 edit_delete_mailbox() {
     echo "Existing domains:"
@@ -312,6 +387,10 @@ edit_delete_mailbox() {
         if [ -n "$domain" ]; then
             log "Selected domain: $domain"
             mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users | grep "@$domain")
+            if [ -z "$mailboxes" ]; then
+                log "No mailboxes found for domain $domain."
+                return
+            fi
             echo "Select mailbox:"
             select email_address in $mailboxes; do
                 if [ -n "$email_address" ]; then
@@ -371,6 +450,11 @@ edit_delete_redirect_domain() {
     echo "Existing redirect domains:"
     awk '{print $1}' /etc/postfix/virtual_domains
     read -p "Enter the redirect domain you want to edit/delete: " redirect_domain
+    # Validate domain format
+    if [[ ! "$redirect_domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+        log "Invalid domain format."
+        return
+    fi
     # Check if redirect domain exists
     if grep -qw "^$redirect_domain" /etc/postfix/virtual_domains; then
         echo "What would you like to do?"
@@ -382,9 +466,13 @@ edit_delete_redirect_domain() {
                 # List existing mailboxes
                 echo "Available mailboxes to redirect to:"
                 mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
+                if [ -z "$mailboxes" ]; then
+                    log "No mailboxes found. Please add a mailbox first."
+                    return
+                fi
                 select forward_to in $mailboxes; do
                     if [ -n "$forward_to" ]; then
-                        # Update the forwarding address in virtual file
+                        # Update the forwarding address in /etc/postfix/virtual
                         sed -i "s|^@$redirect_domain\s\+.*|@$redirect_domain    $forward_to|" /etc/postfix/virtual
                         postmap /etc/postfix/virtual
                         log "Redirect domain $redirect_domain updated to forward to $forward_to."
@@ -417,6 +505,75 @@ edit_delete_redirect_domain() {
     fi
 }
 
+# Function to bulk add redirect domains
+bulk_add_redirect_domains() {
+    read -p "Enter the target mailbox for all redirect domains (e.g., user@example.com): " target_mailbox
+    # Validate target mailbox format
+    if [[ ! "$target_mailbox" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+        log "Invalid email address format."
+        return
+    fi
+
+    # Check if target mailbox exists
+    if ! grep -qw "^$target_mailbox:" /etc/dovecot/users; then
+        log "Target mailbox $target_mailbox does not exist. Please add it first."
+        return
+    fi
+
+    log "Enter the list of redirect domains, one per line. Press ENTER on an empty line to finish:"
+    redirect_domains=()
+    while true; do
+        read -p "Redirect Domain: " domain
+        if [ -z "$domain" ]; then
+            break
+        fi
+        # Validate domain format
+        if [[ ! "$domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+            log "Invalid domain format: $domain. Skipping."
+            continue
+        fi
+        redirect_domains+=("$domain")
+    done
+
+    if [ ${#redirect_domains[@]} -eq 0 ]; then
+        log "No valid redirect domains entered."
+        return
+    fi
+
+    for redirect_domain in "${redirect_domains[@]}"; do
+        # Check if redirect domain already exists
+        if grep -qw "^$redirect_domain" /etc/postfix/virtual_domains; then
+            log "Redirect domain $redirect_domain already exists. Updating forwarding address."
+            # Update the forwarding address in /etc/postfix/virtual
+            sed -i "s|^@$redirect_domain\s\+.*|@$redirect_domain    $target_mailbox|" /etc/postfix/virtual
+            log "Updated forwarding for $redirect_domain to $target_mailbox."
+        else
+            # Add redirect domain
+            echo "$redirect_domain" >> /etc/postfix/virtual_domains
+            # Update virtual_alias_domains
+            existing_alias_domains=$(postconf -h virtual_alias_domains)
+            if [ -z "$existing_alias_domains" ]; then
+                postconf -e "virtual_alias_domains = $redirect_domain"
+            else
+                postconf -e "virtual_alias_domains = $existing_alias_domains, $redirect_domain"
+            fi
+            log "Added $redirect_domain to virtual_alias_domains."
+            # Add forwarding entry
+            echo "@$redirect_domain    $target_mailbox" >> /etc/postfix/virtual
+            log "Added forwarding for $redirect_domain to $target_mailbox."
+        fi
+    done
+
+    # Regenerate Postfix virtual maps
+    postmap /etc/postfix/virtual
+
+    # Restart Postfix to apply changes
+    log "Restarting Postfix..."
+    systemctl restart postfix
+
+    log "Bulk redirect domains have been processed."
+}
+
 # Function to change mailbox password
 change_mailbox_password() {
     echo "Existing domains:"
@@ -425,6 +582,10 @@ change_mailbox_password() {
         if [ -n "$domain" ]; then
             log "Selected domain: $domain"
             mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users | grep "@$domain")
+            if [ -z "$mailboxes" ]; then
+                log "No mailboxes found for domain $domain."
+                return
+            fi
             echo "Select mailbox:"
             select email_address in $mailboxes; do
                 if [ -n "$email_address" ]; then
@@ -527,9 +688,8 @@ ensure_services_running() {
 # Function to test email sending and receiving
 test_mail_server() {
     log "Testing mail server functionality..."
-    # Note: Automated testing would require sending an email via SMTP and checking delivery.
-    # This is typically done manually or using external tools/scripts.
-    log "Please send a test email to a mailbox and verify its reception."
+    log "Please send a test email to a mailbox and verify its reception in /var/mail/vhosts/<domain>/<user>/."
+    log "You can monitor the mail logs using: sudo tail -f /var/log/mail.log"
 }
 
 # Main menu
@@ -539,30 +699,32 @@ main_menu() {
         echo "===== Mail Server Management Menu ====="
         echo "1) Add a main domain and mailboxes"
         echo "2) Add a redirect domain"
-        echo "3) Edit/Delete a mailbox"
-        echo "4) Edit/Delete a redirect domain"
-        echo "5) Change mailbox password"
-        echo "6) Edit hostname"
-        echo "7) Show main domains and mailboxes"
-        echo "8) Show redirect domains"
-        echo "9) Show mailbox usage"
-        echo "10) Test mail server functionality"
-        echo "11) Exit"
+        echo "3) Bulk add redirect domains"
+        echo "4) Edit/Delete a mailbox"
+        echo "5) Edit/Delete a redirect domain"
+        echo "6) Change mailbox password"
+        echo "7) Edit hostname"
+        echo "8) Show main domains and mailboxes"
+        echo "9) Show redirect domains"
+        echo "10) Show mailbox usage"
+        echo "11) Test mail server functionality"
+        echo "12) Exit"
         echo "======================================="
-        read -p "Enter your choice [1-11]: " choice
+        read -p "Enter your choice [1-12]: " choice
         case $choice in
             1) add_main_domain;;
             2) add_redirect_domain;;
-            3) edit_delete_mailbox;;
-            4) edit_delete_redirect_domain;;
-            5) change_mailbox_password;;
-            6) edit_hostname;;
-            7) show_main_domains_and_mailboxes;;
-            8) show_redirect_domains;;
-            9) show_mailbox_usage;;
-            10) test_mail_server;;
-            11) log "Exiting script."; exit 0;;
-            *) log "Invalid option. Please choose between 1 and 11.";;
+            3) bulk_add_redirect_domains;;
+            4) edit_delete_mailbox;;
+            5) edit_delete_redirect_domain;;
+            6) change_mailbox_password;;
+            7) edit_hostname;;
+            8) show_main_domains_and_mailboxes;;
+            9) show_redirect_domains;;
+            10) show_mailbox_usage;;
+            11) test_mail_server;;
+            12) log "Exiting script."; exit 0;;
+            *) log "Invalid option. Please choose between 1 and 12.";;
         esac
     done
 }
