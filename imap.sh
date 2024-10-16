@@ -2,7 +2,7 @@
 
 # Check for root privileges
 if [[ $EUID -ne 0 ]]; then
-   echo "This script must be run as root" 
+   echo "This script must be run as root"
    exit 1
 fi
 
@@ -36,28 +36,36 @@ if ! dpkg -l | grep -qw postfix; then
     # Initialize files if they don't exist
     touch /etc/postfix/virtual
     touch /etc/postfix/virtual_domains
+    touch /etc/postfix/vmailbox
     touch /etc/dovecot/users
 
     # Postfix configuration
-    postconf -e 'virtual_mailbox_domains = proxy:mysql:/etc/postfix/mysql-virtual-mailbox-domains.cf'
-    postconf -e 'virtual_mailbox_maps = proxy:mysql:/etc/postfix/mysql-virtual-mailbox-maps.cf'
-    postconf -e 'virtual_alias_maps = hash:/etc/postfix/virtual'
+    postconf -e "virtual_mailbox_domains ="
+    postconf -e "virtual_mailbox_maps = hash:/etc/postfix/vmailbox"
+    postconf -e "virtual_alias_maps = hash:/etc/postfix/virtual"
 
     # Dovecot configuration
     echo "auth_mechanisms = plain login" >> /etc/dovecot/conf.d/10-auth.conf
     echo "disable_plaintext_auth = no" >> /etc/dovecot/conf.d/10-auth.conf
     echo "mail_location = maildir:/var/mail/vhosts/%d/%n" >> /etc/dovecot/conf.d/10-mail.conf
     echo "userdb {
-        driver = passwd-file
-        args = username_format=%u /etc/dovecot/users
-    }" >> /etc/dovecot/conf.d/auth-passwdfile.conf.ext
+    driver = passwd-file
+    args = username_format=%u /etc/dovecot/users
+}" >> /etc/dovecot/conf.d/auth-passwdfile.conf.ext
 
     echo "passdb {
-        driver = passwd-file
-        args = username_format=%u /etc/dovecot/users
-    }" >> /etc/dovecot/conf.d/auth-passwdfile.conf.ext
+    driver = passwd-file
+    args = username_format=%u /etc/dovecot/users
+}" >> /etc/dovecot/conf.d/auth-passwdfile.conf.ext
 
     echo "!include auth-passwdfile.conf.ext" >> /etc/dovecot/conf.d/10-auth.conf
+
+    # Set permissions for mail directories
+    groupadd -g 5000 vmail
+    useradd -g vmail -u 5000 vmail -d /var/mail
+    mkdir -p /var/mail/vhosts
+    chown -R vmail:vmail /var/mail
+    chmod -R 700 /var/mail
 
     # Restart services
     systemctl restart postfix
@@ -71,25 +79,26 @@ fi
 # Function to add a main domain and mailboxes
 add_main_domain() {
     read -p "Enter the main domain you want to add: " main_domain
-    # Check if domain already exists
-    if grep -q "$main_domain" /etc/postfix/main.cf; then
+    # Check if domain already exists in virtual_mailbox_domains
+    if postconf -n | grep -q "virtual_mailbox_domains.*$main_domain"; then
         echo "Domain $main_domain already exists."
     else
         # Add domain to virtual_mailbox_domains
-        postconf -e "virtual_mailbox_domains = \$virtual_mailbox_domains, $main_domain"
-        mkdir -p /var/mail/vhosts/"$main_domain"
-        # Ensure vmail user and group exist
-        if ! id -u vmail >/dev/null 2>&1; then
-            groupadd -g 5000 vmail
-            useradd -g vmail -u 5000 vmail -d /var/mail
+        existing_domains=$(postconf -h virtual_mailbox_domains)
+        if [ -z "$existing_domains" ]; then
+            postconf -e "virtual_mailbox_domains = $main_domain"
+        else
+            postconf -e "virtual_mailbox_domains = $existing_domains, $main_domain"
         fi
-        chown -R vmail:vmail /var/mail
     fi
+
+    mkdir -p /var/mail/vhosts/"$main_domain"
+    chown -R vmail:vmail /var/mail/vhosts/"$main_domain"
 
     while true; do
         read -p "Do you want to add a mailbox to $main_domain? (y/n): " yn
         case $yn in
-            [Yy]* ) 
+            [Yy]* )
                 read -p "Enter the email address (e.g., user@$main_domain): " email_address
                 username=$(echo "$email_address" | cut -d'@' -f1)
                 domain=$(echo "$email_address" | cut -d'@' -f2)
@@ -107,8 +116,12 @@ add_main_domain() {
                 else
                     # Add to Dovecot user database
                     echo "$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$main_domain/$username::" >> /etc/dovecot/users
+                    # Add to Postfix vmailbox file
+                    echo "$email_address    $main_domain/$username/" >> /etc/postfix/vmailbox
+                    postmap /etc/postfix/vmailbox
                     mkdir -p /var/mail/vhosts/"$main_domain"/"$username"
                     chown -R vmail:vmail /var/mail/vhosts/"$main_domain"/"$username"
+                    chmod -R 700 /var/mail/vhosts/"$main_domain"/"$username"
                     echo "Mailbox $email_address added."
                 fi
                 ;;
@@ -116,6 +129,9 @@ add_main_domain() {
             * ) echo "Please answer yes or no.";;
         esac
     done
+
+    # Restart Postfix to apply changes
+    systemctl restart postfix
 }
 
 # Function to add a redirect domain
@@ -141,6 +157,9 @@ add_redirect_domain() {
             echo "Invalid selection."
         fi
     done
+
+    # Restart Postfix to apply changes
+    systemctl restart postfix
 }
 
 # Function to edit/delete a mailbox
@@ -182,9 +201,14 @@ edit_delete_mailbox() {
                                 domain=$(echo "$email_address" | cut -d'@' -f2)
                                 # Remove user's line from Dovecot user database
                                 sed -i "/^$email_address:/d" /etc/dovecot/users
+                                # Remove user's line from Postfix vmailbox file
+                                sed -i "/^$email_address\s/d" /etc/postfix/vmailbox
+                                postmap /etc/postfix/vmailbox
                                 # Remove user's mailbox directory
                                 rm -rf /var/mail/vhosts/"$domain"/"$username"
                                 echo "Mailbox $email_address deleted."
+                                # Restart Postfix to apply changes
+                                systemctl restart postfix
                             fi
                             ;;
                         *)
@@ -240,6 +264,8 @@ edit_delete_redirect_domain() {
                 echo "Invalid option."
                 ;;
         esac
+        # Restart Postfix to apply changes
+        systemctl restart postfix
     else
         echo "Redirect domain $redirect_domain does not exist."
     fi
