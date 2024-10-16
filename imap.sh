@@ -172,7 +172,7 @@ edit_delete_mailbox() {
                             echo "Password updated for $email_address."
                             ;;
                         2)
-                            # Check if any redirect domains or catch-all are associated
+                            # Check if any redirect domains are associated
                             if grep -q "$email_address" /etc/postfix/virtual; then
                                 echo "Cannot delete mailbox $email_address because it is associated with redirect domains."
                                 echo "Please remove or update the associated entries first."
