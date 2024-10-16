@@ -102,6 +102,19 @@ if ! dpkg -l | grep -qw postfix; then
     echo "auth_mechanisms = plain login" >> /etc/dovecot/conf.d/10-auth.conf
     echo "disable_plaintext_auth = no" >> /etc/dovecot/conf.d/10-auth.conf
     echo "mail_location = maildir:/var/mail/vhosts/%d/%n" >> /etc/dovecot/conf.d/10-mail.conf
+    echo "mail_plugins = \$mail_plugins quota" >> /etc/dovecot/conf.d/10-mail.conf
+
+    echo "protocol imap {
+        mail_plugins = \$mail_plugins quota imap_quota
+    }" >> /etc/dovecot/conf.d/20-imap.conf
+
+    cat <<EOT > /etc/dovecot/conf.d/90-quota.conf
+plugin {
+    quota = maildir:User quota
+    quota_rule = *:storage=2G
+}
+EOT
+
     echo "userdb {
     driver = passwd-file
     args = username_format=%u /etc/dovecot/users
@@ -261,15 +274,15 @@ add_main_domain() {
                 if grep -q "^$email_address:" /etc/dovecot/users; then
                     echo "User $email_address already exists."
                 else
-                    # Add to Dovecot user database
-                    echo "$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$main_domain/$username::" >> /etc/dovecot/users
+                    # Add to Dovecot user database with default quota
+                    echo "$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$main_domain/$username::userdb_quota_rule=*:storage=2G" >> /etc/dovecot/users
                     # Add to Postfix vmailbox file
                     echo "$email_address    $main_domain/$username/" >> /etc/postfix/vmailbox
                     postmap /etc/postfix/vmailbox
                     mkdir -p /var/mail/vhosts/"$main_domain"/"$username"
                     chown -R vmail:vmail /var/mail/vhosts/"$main_domain"/"$username"
                     chmod -R 700 /var/mail/vhosts/"$main_domain"/"$username"
-                    echo "Mailbox $email_address added."
+                    echo "Mailbox $email_address added with default quota of 2G."
                 fi
                 ;;
             [Nn]* ) break;;
@@ -277,8 +290,9 @@ add_main_domain() {
         esac
     done
 
-    # Restart Postfix to apply changes
+    # Restart Postfix and Dovecot to apply changes
     systemctl restart postfix
+    systemctl restart dovecot
 }
 
 # Function to add a redirect domain
@@ -335,7 +349,7 @@ edit_delete_mailbox() {
                             username=$(echo "$email_address" | cut -d'@' -f1)
                             domain=$(echo "$email_address" | cut -d'@' -f2)
                             # Update the user's password
-                            sed -i "s|^$email_address:.*|$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$domain/$username::|" /etc/dovecot/users
+                            sed -i "s|^$email_address:.*|$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$domain/$username::userdb_quota_rule=*:storage=2G|" /etc/dovecot/users
                             echo "Password updated for $email_address."
                             ;;
                         2)
@@ -352,11 +366,12 @@ edit_delete_mailbox() {
                                 # Remove user's line from Postfix vmailbox file
                                 sed -i "/^$email_address\s/d" /etc/postfix/vmailbox
                                 postmap /etc/postfix/vmailbox
-                                # Remove user's mailbox directory
+                                # Remove user's mailbox directory and all data
                                 rm -rf /var/mail/vhosts/"$domain"/"$username"
-                                echo "Mailbox $email_address deleted."
-                                # Restart Postfix to apply changes
+                                echo "Mailbox $email_address and all associated data deleted."
+                                # Restart Postfix and Dovecot to apply changes
                                 systemctl restart postfix
+                                systemctl restart dovecot
                             fi
                             ;;
                         *)
@@ -461,7 +476,7 @@ edit_delete_redirect_domain() {
         else
             echo "Redirect domain $redirect_domain does not exist."
         fi
-    fi
+    }
 }
 
 # Function to change mailbox password
@@ -483,8 +498,41 @@ change_mailbox_password() {
                     username=$(echo "$email_address" | cut -d'@' -f1)
                     domain=$(echo "$email_address" | cut -d'@' -f2)
                     # Update the user's password
-                    sed -i "s|^$email_address:.*|$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$domain/$username::|" /etc/dovecot/users
+                    # Preserve existing quota setting
+                    quota_rule=$(grep "^$email_address:" /etc/dovecot/users | awk -F'userdb_quota_rule=' '{print $2}')
+                    sed -i "s|^$email_address:.*|$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$domain/$username::userdb_quota_rule=$quota_rule|" /etc/dovecot/users
                     echo "Password updated for $email_address."
+                    break 2
+                else
+                    echo "Invalid selection."
+                fi
+            done
+        else
+            echo "Invalid selection."
+        fi
+    done
+}
+
+# Function to change mailbox quota
+change_mailbox_quota() {
+    echo "Existing domains:"
+    domains=$(awk -F':' '{print $1}' /etc/dovecot/users | cut -d'@' -f2 | sort | uniq)
+    select domain in $domains; do
+        if [ -n "$domain" ]; then
+            echo "Selected domain: $domain"
+            mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users | grep "@$domain")
+            echo "Select mailbox to change quota:"
+            select email_address in $mailboxes; do
+                if [ -n "$email_address" ]; then
+                    read -p "Enter the new quota for $email_address (e.g., 1G, 500M): " quota
+                    # Extract username and domain
+                    username=$(echo "$email_address" | cut -d'@' -f1)
+                    domain=$(echo "$email_address" | cut -d'@' -f2)
+                    # Update the user's quota
+                    sed -i "s|\(^$email_address:.*userdb_quota_rule=\)\(.*\)|\1*:storage=$quota|" /etc/dovecot/users
+                    echo "Quota updated to $quota for $email_address."
+                    # Restart Dovecot to apply changes
+                    systemctl restart dovecot
                     break 2
                 else
                     echo "Invalid selection."
@@ -566,12 +614,13 @@ while true; do
     echo "4) Edit/Delete a mailbox"
     echo "5) Edit/Delete a redirect domain"
     echo "6) Change mailbox password"
-    echo "7) Edit hostname"
-    echo "8) Show main domains and mailboxes"
-    echo "9) Show redirect domains"
-    echo "10) Show mailbox usage"
-    echo "11) Exit"
-    read -p "Enter your choice [1-11]: " choice
+    echo "7) Change mailbox quota"
+    echo "8) Edit hostname"
+    echo "9) Show main domains and mailboxes"
+    echo "10) Show redirect domains"
+    echo "11) Show mailbox usage"
+    echo "12) Exit"
+    read -p "Enter your choice [1-12]: " choice
     case $choice in
         1) add_main_domain;;
         2) add_redirect_domain;;
@@ -579,11 +628,12 @@ while true; do
         4) edit_delete_mailbox;;
         5) edit_delete_redirect_domain;;
         6) change_mailbox_password;;
-        7) edit_hostname;;
-        8) show_main_domains_and_mailboxes;;
-        9) show_redirect_domains;;
-        10) show_mailbox_usage;;
-        11) break;;
+        7) change_mailbox_quota;;
+        8) edit_hostname;;
+        9) show_main_domains_and_mailboxes;;
+        10) show_redirect_domains;;
+        11) show_mailbox_usage;;
+        12) break;;
         *) echo "Invalid option.";;
     esac
 done
