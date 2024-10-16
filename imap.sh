@@ -349,7 +349,9 @@ edit_delete_mailbox() {
                             username=$(echo "$email_address" | cut -d'@' -f1)
                             domain=$(echo "$email_address" | cut -d'@' -f2)
                             # Update the user's password
-                            sed -i "s|^$email_address:.*|$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$domain/$username::userdb_quota_rule=*:storage=2G|" /etc/dovecot/users
+                            # Preserve existing quota setting
+                            quota_rule=$(grep "^$email_address:" /etc/dovecot/users | awk -F'userdb_quota_rule=' '{print $2}')
+                            sed -i "s|^$email_address:.*|$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$domain/$username::userdb_quota_rule=$quota_rule|" /etc/dovecot/users
                             echo "Password updated for $email_address."
                             ;;
                         2)
@@ -476,7 +478,7 @@ edit_delete_redirect_domain() {
         else
             echo "Redirect domain $redirect_domain does not exist."
         fi
-    }
+    fi
 }
 
 # Function to change mailbox password
