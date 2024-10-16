@@ -59,12 +59,14 @@ if ! dpkg -l | grep -qw postfix; then
     postconf -e "virtual_mailbox_domains ="
     postconf -e "virtual_mailbox_maps = hash:/etc/postfix/vmailbox"
     postconf -e "virtual_alias_maps = hash:/etc/postfix/virtual"
+    postconf -e "virtual_alias_domains = hash:/etc/postfix/virtual_domains"
     postconf -e "virtual_mailbox_base = /var/mail/vhosts"
     postconf -e "virtual_uid_maps = static:5000"
     postconf -e "virtual_gid_maps = static:5000"
 
     # Generate initial database files
     postmap /etc/postfix/virtual
+    postmap /etc/postfix/virtual_domains
     postmap /etc/postfix/vmailbox
 
     # Dovecot configuration
@@ -103,6 +105,12 @@ else
     postconf -e "virtual_mailbox_base = /var/mail/vhosts"
     postconf -e "virtual_uid_maps = static:5000"
     postconf -e "virtual_gid_maps = static:5000"
+    postconf -e "virtual_alias_domains = hash:/etc/postfix/virtual_domains"
+    postconf -e "virtual_alias_maps = hash:/etc/postfix/virtual"
+
+    # Generate hash maps
+    postmap /etc/postfix/virtual
+    postmap /etc/postfix/virtual_domains
 
     # Restart Postfix to apply changes
     systemctl restart postfix
@@ -176,6 +184,7 @@ add_redirect_domain() {
         echo "Redirect domain $redirect_domain already exists."
     else
         echo "$redirect_domain    anything" >> /etc/postfix/virtual_domains
+        postmap /etc/postfix/virtual_domains
     fi
 
     # List existing mailboxes
@@ -291,6 +300,7 @@ edit_delete_redirect_domain() {
                 sed -i "/^$redirect_domain/d" /etc/postfix/virtual_domains
                 # Remove forwarding entry from virtual
                 sed -i "/^@$redirect_domain/d" /etc/postfix/virtual
+                postmap /etc/postfix/virtual_domains
                 postmap /etc/postfix/virtual
                 echo "Redirect domain $redirect_domain deleted."
                 ;;
