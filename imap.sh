@@ -31,6 +31,34 @@ install_rsyslog() {
     fi
 }
 
+# Function to update virtual_alias_maps to include both hash and regexp maps
+update_virtual_alias_maps() {
+    current_maps=$(postconf -h virtual_alias_maps | tr -d ' ')
+    # Ensure that both hash and regexp maps are included
+    new_maps=""
+    if [[ "$current_maps" == *"hash:/etc/postfix/virtual"* ]]; then
+        new_maps="$current_maps"
+    else
+        if [ -z "$current_maps" ]; then
+            new_maps="hash:/etc/postfix/virtual"
+        else
+            new_maps="$current_maps,hash:/etc/postfix/virtual"
+        fi
+    fi
+    if [[ "$current_maps" == *"regexp:/etc/postfix/virtual_regexp"* ]]; then
+        # Already includes regexp map
+        :
+    else
+        new_maps="$new_maps,regexp:/etc/postfix/virtual_regexp"
+    fi
+    # Remove leading commas
+    new_maps=$(echo "$new_maps" | sed 's/^,\s*//')
+    # Remove duplicate commas
+    new_maps=$(echo "$new_maps" | sed 's/,\s*/,/g')
+    # Update virtual_alias_maps
+    postconf -e "virtual_alias_maps = $new_maps"
+}
+
 # Initial setup check
 if ! dpkg -l | grep -qw postfix; then
     # Prompt for hostname during installation
@@ -54,15 +82,16 @@ if ! dpkg -l | grep -qw postfix; then
     touch /etc/postfix/virtual_domains
     touch /etc/postfix/vmailbox
     touch /etc/dovecot/users
+    touch /etc/postfix/virtual_regexp
 
     # Postfix configuration
     postconf -e "virtual_mailbox_domains ="
     postconf -e "virtual_mailbox_maps = hash:/etc/postfix/vmailbox"
-    postconf -e "virtual_alias_maps = hash:/etc/postfix/virtual"
     postconf -e "virtual_alias_domains = hash:/etc/postfix/virtual_domains"
     postconf -e "virtual_mailbox_base = /var/mail/vhosts"
     postconf -e "virtual_uid_maps = static:5000"
     postconf -e "virtual_gid_maps = static:5000"
+    postconf -e "virtual_alias_maps = hash:/etc/postfix/virtual, regexp:/etc/postfix/virtual_regexp"
 
     # Generate initial database files
     postmap /etc/postfix/virtual
@@ -106,7 +135,9 @@ else
     postconf -e "virtual_uid_maps = static:5000"
     postconf -e "virtual_gid_maps = static:5000"
     postconf -e "virtual_alias_domains = hash:/etc/postfix/virtual_domains"
-    postconf -e "virtual_alias_maps = hash:/etc/postfix/virtual"
+
+    # Update virtual_alias_maps to include both hash and regexp maps
+    update_virtual_alias_maps
 
     # Generate hash maps
     postmap /etc/postfix/virtual
@@ -117,6 +148,80 @@ else
 
     echo "Postfix is already installed. Updated configurations."
 fi
+
+# Function to add multiple redirect domains
+add_multiple_redirect_domains() {
+    echo "Enter the redirect domains you want to add, one per line."
+    echo "When done, enter an empty line to finish:"
+    domains=()
+    while true; do
+        read domain
+        if [ -z "$domain" ]; then
+            break
+        fi
+        domains+=("$domain")
+    done
+
+    if [ ${#domains[@]} -eq 0 ]; then
+        echo "No domains entered."
+        return
+    fi
+
+    # List existing mailboxes
+    echo "Available mailboxes to redirect to:"
+    mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
+    select forward_to in $mailboxes; do
+        if [ -n "$forward_to" ]; then
+            break
+        else
+            echo "Invalid selection."
+        fi
+    done
+
+    for redirect_domain in "${domains[@]}"; do
+        # Check for wildcard domain
+        if [[ "$redirect_domain" == *"*"* ]]; then
+            echo "Adding wildcard domain: $redirect_domain"
+            # Update virtual_alias_maps to include regexp map
+            update_virtual_alias_maps
+            touch /etc/postfix/virtual_regexp
+
+            # Convert wildcard domain to regex pattern
+            pattern=$(echo "$redirect_domain" | sed 's/\./\\./g' | sed 's/\*/.*/g')
+
+            # Check if pattern already exists
+            if grep -qE "^$pattern[[:space:]]" /etc/postfix/virtual_regexp; then
+                # Update the forwarding address
+                sed -i "s|^$pattern\s.*|$pattern    $forward_to|" /etc/postfix/virtual_regexp
+                echo "Updated wildcard domain $redirect_domain to forward to $forward_to."
+            else
+                echo "$pattern    $forward_to" >> /etc/postfix/virtual_regexp
+                echo "Added wildcard domain $redirect_domain to forward to $forward_to."
+            fi
+        else
+            # Non-wildcard domain
+            # Check if domain already exists
+            if grep -q "^$redirect_domain" /etc/postfix/virtual_domains; then
+                echo "Redirect domain $redirect_domain already exists. Updating forwarding address."
+            else
+                echo "$redirect_domain    anything" >> /etc/postfix/virtual_domains
+                postmap /etc/postfix/virtual_domains
+            fi
+
+            # Update forwarding address
+            if grep -q "^@$redirect_domain" /etc/postfix/virtual; then
+                sed -i "s|^@$redirect_domain\s.*|@$redirect_domain    $forward_to|" /etc/postfix/virtual
+            else
+                echo "@$redirect_domain    $forward_to" >> /etc/postfix/virtual
+            fi
+            postmap /etc/postfix/virtual
+            echo "Redirect domain $redirect_domain added/updated to forward to $forward_to."
+        fi
+    done
+
+    # Restart Postfix to apply changes
+    systemctl restart postfix
+}
 
 # Function to add a main domain and mailboxes
 add_main_domain() {
@@ -271,47 +376,91 @@ edit_delete_mailbox() {
 
 # Function to edit/delete a redirect domain
 edit_delete_redirect_domain() {
+    # Updated to handle wildcard domains
     echo "Existing redirect domains:"
     awk '{print $1}' /etc/postfix/virtual_domains
+    if [ -f /etc/postfix/virtual_regexp ]; then
+        echo "Wildcard redirect domains:"
+        awk '{print $1}' /etc/postfix/virtual_regexp
+    fi
     read -p "Enter the redirect domain you want to edit/delete: " redirect_domain
-    if grep -q "^$redirect_domain" /etc/postfix/virtual_domains; then
-        echo "What would you like to do?"
-        echo "1) Change forwarding address"
-        echo "2) Delete redirect domain"
-        read -p "Enter your choice [1-2]: " choice
-        case $choice in
-            1)
-                # List existing mailboxes
-                echo "Available mailboxes to redirect to:"
-                mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
-                select forward_to in $mailboxes; do
-                    if [ -n "$forward_to" ]; then
-                        sed -i "s|^@$redirect_domain.*|@$redirect_domain    $forward_to|" /etc/postfix/virtual
-                        postmap /etc/postfix/virtual
-                        echo "Redirect domain $redirect_domain updated to forward to $forward_to."
-                        break
-                    else
-                        echo "Invalid selection."
-                    fi
-                done
-                ;;
-            2)
-                # Remove redirect domain from virtual_domains
-                sed -i "/^$redirect_domain/d" /etc/postfix/virtual_domains
-                # Remove forwarding entry from virtual
-                sed -i "/^@$redirect_domain/d" /etc/postfix/virtual
-                postmap /etc/postfix/virtual_domains
-                postmap /etc/postfix/virtual
-                echo "Redirect domain $redirect_domain deleted."
-                ;;
-            *)
-                echo "Invalid option."
-                ;;
-        esac
-        # Restart Postfix to apply changes
-        systemctl restart postfix
+    if [[ "$redirect_domain" == *"*"* ]]; then
+        # Handle wildcard domain
+        pattern=$(echo "$redirect_domain" | sed 's/\./\\./g' | sed 's/\*/.*/g')
+        if grep -qE "^$pattern[[:space:]]" /etc/postfix/virtual_regexp; then
+            echo "What would you like to do?"
+            echo "1) Change forwarding address"
+            echo "2) Delete redirect domain"
+            read -p "Enter your choice [1-2]: " choice
+            case $choice in
+                1)
+                    # List existing mailboxes
+                    echo "Available mailboxes to redirect to:"
+                    mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
+                    select forward_to in $mailboxes; do
+                        if [ -n "$forward_to" ]; then
+                            sed -i "s|^$pattern\s.*|$pattern    $forward_to|" /etc/postfix/virtual_regexp
+                            echo "Wildcard redirect domain $redirect_domain updated to forward to $forward_to."
+                            break
+                        else
+                            echo "Invalid selection."
+                        fi
+                    done
+                    ;;
+                2)
+                    sed -i "/^$pattern\s.*/d" /etc/postfix/virtual_regexp
+                    echo "Wildcard redirect domain $redirect_domain deleted."
+                    ;;
+                *)
+                    echo "Invalid option."
+                    ;;
+            esac
+            # Restart Postfix to apply changes
+            systemctl restart postfix
+        else
+            echo "Wildcard redirect domain $redirect_domain does not exist."
+        fi
     else
-        echo "Redirect domain $redirect_domain does not exist."
+        # Non-wildcard domain
+        if grep -q "^$redirect_domain" /etc/postfix/virtual_domains; then
+            echo "What would you like to do?"
+            echo "1) Change forwarding address"
+            echo "2) Delete redirect domain"
+            read -p "Enter your choice [1-2]: " choice
+            case $choice in
+                1)
+                    # List existing mailboxes
+                    echo "Available mailboxes to redirect to:"
+                    mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
+                    select forward_to in $mailboxes; do
+                        if [ -n "$forward_to" ]; then
+                            sed -i "s|^@$redirect_domain.*|@$redirect_domain    $forward_to|" /etc/postfix/virtual
+                            postmap /etc/postfix/virtual
+                            echo "Redirect domain $redirect_domain updated to forward to $forward_to."
+                            break
+                        else
+                            echo "Invalid selection."
+                        fi
+                    done
+                    ;;
+                2)
+                    # Remove redirect domain from virtual_domains
+                    sed -i "/^$redirect_domain/d" /etc/postfix/virtual_domains
+                    # Remove forwarding entry from virtual
+                    sed -i "/^@$redirect_domain/d" /etc/postfix/virtual
+                    postmap /etc/postfix/virtual_domains
+                    postmap /etc/postfix/virtual
+                    echo "Redirect domain $redirect_domain deleted."
+                    ;;
+                *)
+                    echo "Invalid option."
+                    ;;
+            esac
+            # Restart Postfix to apply changes
+            systemctl restart postfix
+        else
+            echo "Redirect domain $redirect_domain does not exist."
+        fi
     fi
 }
 
@@ -376,6 +525,14 @@ show_redirect_domains() {
             target=$(grep "^@$redirect_domain" /etc/postfix/virtual | awk '{print $2}')
             echo "Redirect domain: $redirect_domain -> $target"
         done < /etc/postfix/virtual_domains
+    fi
+    if [ -f /etc/postfix/virtual_regexp ]; then
+        echo "Wildcard redirect domains:"
+        while read -r line; do
+            pattern=$(echo "$line" | awk '{print $1}')
+            target=$(echo "$line" | awk '{print $2}')
+            echo "Pattern: $pattern -> $target"
+        done < /etc/postfix/virtual_regexp
     else
         echo "No redirect domains found."
     fi
@@ -405,26 +562,28 @@ while true; do
     echo "Select an option:"
     echo "1) Add a main domain and mailboxes"
     echo "2) Add a redirect domain"
-    echo "3) Edit/Delete a mailbox"
-    echo "4) Edit/Delete a redirect domain"
-    echo "5) Change mailbox password"
-    echo "6) Edit hostname"
-    echo "7) Show main domains and mailboxes"
-    echo "8) Show redirect domains"
-    echo "9) Show mailbox usage"
-    echo "10) Exit"
-    read -p "Enter your choice [1-10]: " choice
+    echo "3) Add multiple redirect domains"
+    echo "4) Edit/Delete a mailbox"
+    echo "5) Edit/Delete a redirect domain"
+    echo "6) Change mailbox password"
+    echo "7) Edit hostname"
+    echo "8) Show main domains and mailboxes"
+    echo "9) Show redirect domains"
+    echo "10) Show mailbox usage"
+    echo "11) Exit"
+    read -p "Enter your choice [1-11]: " choice
     case $choice in
         1) add_main_domain;;
         2) add_redirect_domain;;
-        3) edit_delete_mailbox;;
-        4) edit_delete_redirect_domain;;
-        5) change_mailbox_password;;
-        6) edit_hostname;;
-        7) show_main_domains_and_mailboxes;;
-        8) show_redirect_domains;;
-        9) show_mailbox_usage;;
-        10) break;;
+        3) add_multiple_redirect_domains;;
+        4) edit_delete_mailbox;;
+        5) edit_delete_redirect_domain;;
+        6) change_mailbox_password;;
+        7) edit_hostname;;
+        8) show_main_domains_and_mailboxes;;
+        9) show_redirect_domains;;
+        10) show_mailbox_usage;;
+        11) break;;
         *) echo "Invalid option.";;
     esac
 done
