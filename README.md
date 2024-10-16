@@ -22,7 +22,7 @@ To download and run the IMAP installer, use the following command:
 wget https://raw.githubusercontent.com/arndesk/postfix-installer/main/imap.sh && sudo chmod +x imap.sh && sudo ./imap.sh
 ```
 ```bash
-sudo ./smtp.sh
+sudo ./imap.sh
 ```
 
 ```bash
