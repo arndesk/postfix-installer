@@ -111,7 +111,7 @@ if ! dpkg -l | grep -qw postfix; then
     cat <<EOT > /etc/dovecot/conf.d/90-quota.conf
 plugin {
     quota = maildir:User quota
-    quota_rule = *:storage=2G
+    quota_rule = *:storage=2048M
 }
 EOT
 
@@ -275,14 +275,14 @@ add_main_domain() {
                     echo "User $email_address already exists."
                 else
                     # Add to Dovecot user database with default quota
-                    echo "$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$main_domain/$username::userdb_quota_rule=*:storage=2G" >> /etc/dovecot/users
+                    echo "$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$main_domain/$username::userdb_quota_rule=*:storage=2048M" >> /etc/dovecot/users
                     # Add to Postfix vmailbox file
                     echo "$email_address    $main_domain/$username/" >> /etc/postfix/vmailbox
                     postmap /etc/postfix/vmailbox
                     mkdir -p /var/mail/vhosts/"$main_domain"/"$username"
                     chown -R vmail:vmail /var/mail/vhosts/"$main_domain"/"$username"
                     chmod -R 700 /var/mail/vhosts/"$main_domain"/"$username"
-                    echo "Mailbox $email_address added with default quota of 2G."
+                    echo "Mailbox $email_address added with default quota of 2048M."
                 fi
                 ;;
             [Nn]* ) break;;
@@ -526,13 +526,23 @@ change_mailbox_quota() {
             echo "Select mailbox to change quota:"
             select email_address in $mailboxes; do
                 if [ -n "$email_address" ]; then
-                    read -p "Enter the new quota for $email_address (e.g., 1G, 500M): " quota
+                    while true; do
+                        read -p "Enter the new quota in MB for $email_address (e.g., 1024 for 1GB): " quota
+                        # Validate that quota is a positive integer
+                        if [[ "$quota" =~ ^[0-9]+$ ]]; then
+                            break
+                        else
+                            echo "Invalid input. Please enter a positive integer."
+                        fi
+                    done
+                    # Convert quota to MB format for Dovecot
+                    quota_mb="${quota}M"
                     # Extract username and domain
                     username=$(echo "$email_address" | cut -d'@' -f1)
                     domain=$(echo "$email_address" | cut -d'@' -f2)
                     # Update the user's quota
-                    sed -i "s|\(^$email_address:.*userdb_quota_rule=\)\(.*\)|\1*:storage=$quota|" /etc/dovecot/users
-                    echo "Quota updated to $quota for $email_address."
+                    sed -i "s|\(^$email_address:.*userdb_quota_rule=\)\(.*\)|\1*:storage=${quota_mb}|" /etc/dovecot/users
+                    echo "Quota updated to ${quota_mb} for $email_address."
                     # Restart Dovecot to apply changes
                     systemctl restart dovecot
                     break 2
@@ -591,19 +601,27 @@ show_redirect_domains() {
 # Function to show mailbox usage
 show_mailbox_usage() {
     echo "Mailbox usage:"
-    domains=$(awk -F':' '{print $1}' /etc/dovecot/users | cut -d'@' -f2 | sort | uniq)
-    for domain in $domains; do
-        mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users | grep "@$domain")
-        for mailbox in $mailboxes; do
-            username=$(echo "$mailbox" | cut -d'@' -f1)
-            maildir="/var/mail/vhosts/$domain/$username"
-            if [ -d "$maildir" ]; then
-                size=$(du -sh "$maildir" | cut -f1)
-                echo "$mailbox: $size"
+    mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
+    for mailbox in $mailboxes; do
+        # Get quota and usage using doveadm
+        quota_info=$(doveadm quota get -u "$mailbox")
+        if [ -n "$quota_info" ]; then
+            # Parse the output
+            storage_line=$(echo "$quota_info" | grep 'STORAGE')
+            used_kB=$(echo "$storage_line" | awk '{print $3}')
+            limit_kB=$(echo "$storage_line" | awk '{print $4}')
+            # Convert to MB
+            used_MB=$((used_kB / 1024))
+            if [ "$limit_kB" -eq -1 ]; then
+                limit_display="Unlimited"
             else
-                echo "$mailbox: Maildir not found."
+                limit_MB=$((limit_kB / 1024))
+                limit_display="${limit_MB}MB"
             fi
-        done
+            echo "$mailbox: Used ${used_MB}MB, Quota ${limit_display}"
+        else
+            echo "$mailbox: Could not retrieve quota information."
+        fi
     done
 }
 
