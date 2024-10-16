@@ -18,6 +18,19 @@ preconfigure_postfix() {
     echo "postfix postfix/mailname string $mail_hostname" | debconf-set-selections
 }
 
+# Function to install rsyslog if not installed
+install_rsyslog() {
+    if ! dpkg -l | grep -qw rsyslog; then
+        echo "Installing rsyslog..."
+        apt update
+        apt install -y rsyslog
+        systemctl enable rsyslog
+        systemctl start rsyslog
+    else
+        echo "rsyslog is already installed."
+    fi
+}
+
 # Initial setup check
 if ! dpkg -l | grep -qw postfix; then
     # Prompt for hostname during installation
@@ -26,6 +39,9 @@ if ! dpkg -l | grep -qw postfix; then
 
     # Preconfigure Postfix before installation
     preconfigure_postfix
+
+    # Install rsyslog
+    install_rsyslog
 
     # Update package list
     apt update
@@ -43,6 +59,9 @@ if ! dpkg -l | grep -qw postfix; then
     postconf -e "virtual_mailbox_domains ="
     postconf -e "virtual_mailbox_maps = hash:/etc/postfix/vmailbox"
     postconf -e "virtual_alias_maps = hash:/etc/postfix/virtual"
+    postconf -e "virtual_mailbox_base = /var/mail/vhosts"
+    postconf -e "virtual_uid_maps = static:5000"
+    postconf -e "virtual_gid_maps = static:5000"
 
     # Generate initial database files
     postmap /etc/postfix/virtual
@@ -77,7 +96,18 @@ if ! dpkg -l | grep -qw postfix; then
 
     echo "Mail server setup is complete."
 else
-    echo "Postfix is already installed. Skipping initial setup."
+    # Install rsyslog
+    install_rsyslog
+
+    # Update Postfix configuration
+    postconf -e "virtual_mailbox_base = /var/mail/vhosts"
+    postconf -e "virtual_uid_maps = static:5000"
+    postconf -e "virtual_gid_maps = static:5000"
+
+    # Restart Postfix to apply changes
+    systemctl restart postfix
+
+    echo "Postfix is already installed. Updated configurations."
 fi
 
 # Function to add a main domain and mailboxes
