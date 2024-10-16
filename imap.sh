@@ -31,7 +31,7 @@ if ! dpkg -l | grep -qw postfix; then
     apt update
 
     # Install necessary packages without prompts
-    DEBIAN_FRONTEND=noninteractive apt install -y postfix dovecot-imapd mutt
+    DEBIAN_FRONTEND=noninteractive apt install -y postfix dovecot-imapd
 
     # Initialize files if they don't exist
     touch /etc/postfix/virtual
@@ -118,65 +118,6 @@ add_main_domain() {
     done
 }
 
-# Function to add a catch-all mailbox for a main domain
-add_catchall_mailbox() {
-    read -p "Enter the main domain for the catch-all mailbox: " main_domain
-    # Check if domain exists
-    if ! grep -q "$main_domain" /etc/postfix/main.cf; then
-        echo "Domain $main_domain does not exist. Please add it first."
-        return
-    fi
-
-    # List existing mailboxes
-    echo "Available mailboxes to redirect to:"
-    mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users | grep "@$main_domain")
-    select catchall_email in $mailboxes; do
-        if [ -n "$catchall_email" ]; then
-            # Add catch-all entry
-            echo "@$main_domain    $catchall_email" >> /etc/postfix/virtual
-            postmap /etc/postfix/virtual
-            echo "Catch-all mailbox for $main_domain set to $catchall_email."
-            break
-        else
-            echo "Invalid selection."
-        fi
-    done
-}
-
-# Function to delete a catch-all mailbox
-delete_catchall_mailbox() {
-    read -p "Enter the main domain for which you want to delete the catch-all mailbox: " main_domain
-    if grep -q "^@$main_domain" /etc/postfix/virtual; then
-        sed -i "/^@$main_domain/d" /etc/postfix/virtual
-        postmap /etc/postfix/virtual
-        echo "Catch-all mailbox for $main_domain has been deleted."
-    else
-        echo "No catch-all mailbox found for $main_domain."
-    fi
-}
-
-# Function to edit a catch-all mailbox
-edit_catchall_mailbox() {
-    read -p "Enter the main domain for which you want to edit the catch-all mailbox: " main_domain
-    if grep -q "^@$main_domain" /etc/postfix/virtual; then
-        # List existing mailboxes
-        echo "Available mailboxes to redirect to:"
-        mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users | grep "@$main_domain")
-        select new_catchall_email in $mailboxes; do
-            if [ -n "$new_catchall_email" ]; then
-                sed -i "s|^@$main_domain.*|@$main_domain    $new_catchall_email|" /etc/postfix/virtual
-                postmap /etc/postfix/virtual
-                echo "Catch-all mailbox for $main_domain updated to $new_catchall_email."
-                break
-            else
-                echo "Invalid selection."
-            fi
-        done
-    else
-        echo "No catch-all mailbox found for $main_domain."
-    fi
-}
-
 # Function to add a redirect domain
 add_redirect_domain() {
     read -p "Enter the redirect domain you want to add: " redirect_domain
@@ -233,7 +174,7 @@ edit_delete_mailbox() {
                         2)
                             # Check if any redirect domains or catch-all are associated
                             if grep -q "$email_address" /etc/postfix/virtual; then
-                                echo "Cannot delete mailbox $email_address because it is associated with redirect domains or catch-all addresses."
+                                echo "Cannot delete mailbox $email_address because it is associated with redirect domains."
                                 echo "Please remove or update the associated entries first."
                             else
                                 # Extract username and domain
@@ -302,21 +243,6 @@ edit_delete_redirect_domain() {
     else
         echo "Redirect domain $redirect_domain does not exist."
     fi
-}
-
-# Function to manage catch-all mailboxes
-manage_catchall_mailbox() {
-    echo "Catch-all Mailbox Management:"
-    echo "1) Add a catch-all mailbox"
-    echo "2) Edit a catch-all mailbox"
-    echo "3) Delete a catch-all mailbox"
-    read -p "Enter your choice [1-3]: " choice
-    case $choice in
-        1) add_catchall_mailbox;;
-        2) edit_catchall_mailbox;;
-        3) delete_catchall_mailbox;;
-        *) echo "Invalid option.";;
-    esac
 }
 
 # Function to change mailbox password
@@ -408,29 +334,27 @@ show_mailbox_usage() {
 while true; do
     echo "Select an option:"
     echo "1) Add a main domain and mailboxes"
-    echo "2) Manage catch-all mailboxes"
-    echo "3) Add a redirect domain"
-    echo "4) Edit/Delete a mailbox"
-    echo "5) Edit/Delete a redirect domain"
-    echo "6) Change mailbox password"
-    echo "7) Edit hostname"
-    echo "8) Show main domains and mailboxes"
-    echo "9) Show redirect domains"
-    echo "10) Show mailbox usage"
-    echo "11) Exit"
-    read -p "Enter your choice [1-11]: " choice
+    echo "2) Add a redirect domain"
+    echo "3) Edit/Delete a mailbox"
+    echo "4) Edit/Delete a redirect domain"
+    echo "5) Change mailbox password"
+    echo "6) Edit hostname"
+    echo "7) Show main domains and mailboxes"
+    echo "8) Show redirect domains"
+    echo "9) Show mailbox usage"
+    echo "10) Exit"
+    read -p "Enter your choice [1-10]: " choice
     case $choice in
         1) add_main_domain;;
-        2) manage_catchall_mailbox;;
-        3) add_redirect_domain;;
-        4) edit_delete_mailbox;;
-        5) edit_delete_redirect_domain;;
-        6) change_mailbox_password;;
-        7) edit_hostname;;
-        8) show_main_domains_and_mailboxes;;
-        9) show_redirect_domains;;
-        10) show_mailbox_usage;;
-        11) break;;
+        2) add_redirect_domain;;
+        3) edit_delete_mailbox;;
+        4) edit_delete_redirect_domain;;
+        5) change_mailbox_password;;
+        6) edit_hostname;;
+        7) show_main_domains_and_mailboxes;;
+        8) show_redirect_domains;;
+        9) show_mailbox_usage;;
+        10) break;;
         *) echo "Invalid option.";;
     esac
 done
