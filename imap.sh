@@ -44,6 +44,10 @@ if ! dpkg -l | grep -qw postfix; then
     postconf -e "virtual_mailbox_maps = hash:/etc/postfix/vmailbox"
     postconf -e "virtual_alias_maps = hash:/etc/postfix/virtual"
 
+    # Generate initial database files
+    postmap /etc/postfix/virtual
+    postmap /etc/postfix/vmailbox
+
     # Dovecot configuration
     echo "auth_mechanisms = plain login" >> /etc/dovecot/conf.d/10-auth.conf
     echo "disable_plaintext_auth = no" >> /etc/dovecot/conf.d/10-auth.conf
