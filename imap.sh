@@ -611,7 +611,7 @@ show_main_domains_and_mailboxes() {
         for mailbox in $mailboxes; do
             echo "  - $mailbox"
         done
-    fi
+    done
 }
 
 # Function to show redirect domains and where they redirect
