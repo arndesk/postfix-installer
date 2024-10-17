@@ -130,6 +130,15 @@ EOT
 
     sed -i '/!include auth-system.conf.ext/ a !include auth-passwdfile.conf.ext' /etc/dovecot/conf.d/10-auth.conf
 
+    # Define namespace in Dovecot
+    cat <<EOT >> /etc/dovecot/conf.d/10-mail.conf
+
+namespace inbox {
+  inbox = yes
+  separator = /
+}
+EOT
+
     # Set permissions for mail directories
     groupadd -g 5000 vmail
     useradd -g vmail -u 5000 vmail -d /var/mail
@@ -307,9 +316,11 @@ add_main_domain() {
                     # Add to Postfix vmailbox file
                     echo "$email_address    $main_domain/$username/" >> /etc/postfix/vmailbox
                     postmap /etc/postfix/vmailbox
-                    mkdir -p /var/mail/vhosts/"$main_domain"/"$username"
-                    chown -R vmail:vmail /var/mail/vhosts/"$main_domain"/"$username"
-                    chmod -R 700 /var/mail/vhosts/"$main_domain"/"$username"
+                    # Create Maildir structure
+                    maildir_path="/var/mail/vhosts/$main_domain/$username"
+                    mkdir -p "$maildir_path"/{cur,new,tmp}
+                    chown -R vmail:vmail "$maildir_path"
+                    chmod -R 700 "$maildir_path"
                     echo "Mailbox $email_address added with default quota of 2048M."
                 fi
                 ;;
@@ -439,7 +450,7 @@ edit_delete_redirect_domain() {
     awk '{print $1}' /etc/postfix/virtual_domains
     if [ -f /etc/postfix/virtual_regexp ]; then
         echo "Wildcard redirect domains:"
-        awk '{print $1}' /etc/postfix/virtual_regexp | sed 's/\\\././g' | sed 's/\.*/\*/g'
+        awk '{print $1}' /etc/postfix/virtual_regexp | sed 's/\\\././g' | sed 's/\.\*/\*/g'
     fi
     read -p "Enter the redirect domain you want to edit/delete: " redirect_domain
     if [[ "$redirect_domain" == *"*"* ]]; then
@@ -651,15 +662,20 @@ show_mailbox_usage() {
             storage_line=$(echo "$quota_info" | grep 'STORAGE')
             used_kB=$(echo "$storage_line" | awk '{print $3}')
             limit_kB=$(echo "$storage_line" | awk '{print $4}')
-            # Convert to MB
-            used_MB=$((used_kB / 1024))
+            # Convert to MB and KB
+            if [ "$used_kB" -lt 1024 ]; then
+                used_display="${used_kB}KB"
+            else
+                used_MB=$((used_kB / 1024))
+                used_display="${used_MB}MB"
+            fi
             if [ "$limit_kB" -eq -1 ]; then
                 limit_display="Unlimited"
             else
                 limit_MB=$((limit_kB / 1024))
                 limit_display="${limit_MB}MB"
             fi
-            echo "$mailbox: Used ${used_MB}MB, Quota ${limit_display}"
+            echo "$mailbox: Used ${used_display}, Quota ${limit_display}"
         else
             echo "$mailbox: Could not retrieve quota information."
         fi
