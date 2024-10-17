@@ -1,4 +1,4 @@
-#!/usr/bin/env bash1
+#!/usr/bin/env bash
 
 # Check for root privileges
 if [[ $EUID -ne 0 ]]; then
