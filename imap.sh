@@ -539,7 +539,7 @@ edit_delete_redirect_domain() {
         else
             echo "Redirect domain $redirect_domain does not exist."
         fi
-    }
+    fi
 }
 
 # Function to change mailbox password
