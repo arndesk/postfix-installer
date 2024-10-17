@@ -105,8 +105,8 @@ if ! dpkg -l | grep -qw postfix; then
     echo "mail_plugins = \$mail_plugins quota" >> /etc/dovecot/conf.d/10-mail.conf
 
     echo "protocol imap {
-        mail_plugins = \$mail_plugins quota imap_quota
-    }" >> /etc/dovecot/conf.d/20-imap.conf
+    mail_plugins = \$mail_plugins quota imap_quota
+}" >> /etc/dovecot/conf.d/20-imap.conf
 
     cat <<EOT > /etc/dovecot/conf.d/90-quota.conf
 plugin {
@@ -180,6 +180,9 @@ add_multiple_redirect_domains() {
         return
     fi
 
+    # Remove duplicates
+    domains=($(printf "%s\n" "${domains[@]}" | sort -u))
+
     # List existing mailboxes
     echo "Available mailboxes to redirect to:"
     mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
@@ -191,7 +194,16 @@ add_multiple_redirect_domains() {
         fi
     done
 
+    # Get main domains
+    main_domains=$(postconf -h virtual_mailbox_domains | tr -d ' ' | tr ',' '\n')
+
     for redirect_domain in "${domains[@]}"; do
+        # Check if domain is in main domains
+        if echo "$main_domains" | grep -qw "$redirect_domain"; then
+            echo "Domain $redirect_domain is already a main domain. Skipping."
+            continue
+        fi
+
         # Check for wildcard domain
         if [[ "$redirect_domain" == *"*"* ]]; then
             echo "Adding wildcard domain: $redirect_domain"
@@ -213,8 +225,8 @@ add_multiple_redirect_domains() {
             fi
         else
             # Non-wildcard domain
-            # Check if domain already exists
-            if grep -q "^$redirect_domain" /etc/postfix/virtual_domains; then
+            # Check if domain already exists in virtual_domains
+            if grep -q "^$redirect_domain\s" /etc/postfix/virtual_domains; then
                 echo "Redirect domain $redirect_domain already exists. Updating forwarding address."
             else
                 echo "$redirect_domain    anything" >> /etc/postfix/virtual_domains
@@ -222,7 +234,7 @@ add_multiple_redirect_domains() {
             fi
 
             # Update forwarding address
-            if grep -q "^@$redirect_domain" /etc/postfix/virtual; then
+            if grep -q "^@$redirect_domain\s" /etc/postfix/virtual; then
                 sed -i "s|^@$redirect_domain\s.*|@$redirect_domain    $forward_to|" /etc/postfix/virtual
             else
                 echo "@$redirect_domain    $forward_to" >> /etc/postfix/virtual
@@ -239,6 +251,19 @@ add_multiple_redirect_domains() {
 # Function to add a main domain and mailboxes
 add_main_domain() {
     read -p "Enter the main domain you want to add: " main_domain
+
+    # Check if domain is in redirect domains
+    redirect_domains=$(awk '{print $1}' /etc/postfix/virtual_domains)
+    if [ -f /etc/postfix/virtual_regexp ]; then
+        wildcard_domains=$(awk '{print $1}' /etc/postfix/virtual_regexp | sed 's/\\\././g' | sed 's/\.\*/\*/g')
+        redirect_domains="$redirect_domains"$'\n'"$wildcard_domains"
+    fi
+
+    if echo "$redirect_domains" | grep -qw "$main_domain"; then
+        echo "Domain $main_domain is already a redirect domain. Please remove it from redirect domains first."
+        return
+    fi
+
     # Check if domain already exists in virtual_mailbox_domains
     if postconf -n | grep -q "virtual_mailbox_domains.*$main_domain"; then
         echo "Domain $main_domain already exists."
@@ -298,8 +323,16 @@ add_main_domain() {
 # Function to add a redirect domain
 add_redirect_domain() {
     read -p "Enter the redirect domain you want to add: " redirect_domain
-    # Check if domain already exists
-    if grep -q "^$redirect_domain" /etc/postfix/virtual_domains; then
+
+    # Check if domain is in main domains
+    main_domains=$(postconf -h virtual_mailbox_domains | tr -d ' ' | tr ',' '\n')
+    if echo "$main_domains" | grep -qw "$redirect_domain"; then
+        echo "Domain $redirect_domain is already a main domain. Cannot add it as a redirect domain."
+        return
+    fi
+
+    # Check if domain already exists in virtual_domains
+    if grep -q "^$redirect_domain\s" /etc/postfix/virtual_domains; then
         echo "Redirect domain $redirect_domain already exists."
     else
         echo "$redirect_domain    anything" >> /etc/postfix/virtual_domains
@@ -311,9 +344,14 @@ add_redirect_domain() {
     mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
     select forward_to in $mailboxes; do
         if [ -n "$forward_to" ]; then
-            echo "@$redirect_domain    $forward_to" >> /etc/postfix/virtual
+            # Update forwarding address
+            if grep -q "^@$redirect_domain\s" /etc/postfix/virtual; then
+                sed -i "s|^@$redirect_domain\s.*|@$redirect_domain    $forward_to|" /etc/postfix/virtual
+            else
+                echo "@$redirect_domain    $forward_to" >> /etc/postfix/virtual
+            fi
             postmap /etc/postfix/virtual
-            echo "Redirect domain $redirect_domain added to forward to $forward_to."
+            echo "Redirect domain $redirect_domain added/updated to forward to $forward_to."
             break
         else
             echo "Invalid selection."
@@ -398,7 +436,7 @@ edit_delete_redirect_domain() {
     awk '{print $1}' /etc/postfix/virtual_domains
     if [ -f /etc/postfix/virtual_regexp ]; then
         echo "Wildcard redirect domains:"
-        awk '{print $1}' /etc/postfix/virtual_regexp
+        awk '{print $1}' /etc/postfix/virtual_regexp | sed 's/\\\././g' | sed 's/\.*/\*/g'
     fi
     read -p "Enter the redirect domain you want to edit/delete: " redirect_domain
     if [[ "$redirect_domain" == *"*"* ]]; then
@@ -573,7 +611,7 @@ show_main_domains_and_mailboxes() {
         for mailbox in $mailboxes; do
             echo "  - $mailbox"
         done
-    done
+    fi
 }
 
 # Function to show redirect domains and where they redirect
@@ -589,7 +627,7 @@ show_redirect_domains() {
     if [ -f /etc/postfix/virtual_regexp ]; then
         echo "Wildcard redirect domains:"
         while read -r line; do
-            pattern=$(echo "$line" | awk '{print $1}')
+            pattern=$(echo "$line" | awk '{print $1}' | sed 's/\\\././g' | sed 's/\.\*/\*/g')
             target=$(echo "$line" | awk '{print $2}')
             echo "Pattern: $pattern -> $target"
         done < /etc/postfix/virtual_regexp
