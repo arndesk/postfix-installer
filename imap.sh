@@ -131,8 +131,13 @@ EOT
 
     sed -i '/!include auth-system.conf.ext/ a !include auth-passwdfile.conf.ext' /etc/dovecot/conf.d/10-auth.conf
 
-    # Remove previous namespace configuration (if any)
-    sed -i '/^namespace inbox {/,/^}/d' /etc/dovecot/conf.d/10-mail.conf
+    # Ensure the namespace inbox configuration exists
+    cat << EOF >> /etc/dovecot/conf.d/10-mail.conf
+namespace inbox {
+  inbox = yes
+  separator = /
+}
+EOF
 
     # Set permissions for mail directories
     groupadd -g 5000 vmail
@@ -328,13 +333,11 @@ add_mailbox_to_domain() {
                             chown -R vmail:vmail "/var/mail/vhosts/$domain/$username"
                             chmod -R 700 "/var/mail/vhosts/$domain/$username"
 
-                            # --- Configure the "inbox" namespace ---
-                            # Ensure this configuration exists in /etc/dovecot/conf.d/20-imap.conf or a similar file: 
-                            cat << EOF >> /etc/dovecot/conf.d/20-imap.conf
+                            # Ensure the namespace inbox configuration exists
+                            cat << EOF >> /etc/dovecot/conf.d/10-mail.conf
 namespace inbox {
-  separator = .
-  prefix = 
-  location = 
+  inbox = yes
+  separator = /
 }
 EOF
 
@@ -552,7 +555,7 @@ edit_delete_redirect_domain() {
         else
             echo "Redirect domain $redirect_domain does not exist."
         fi
-    fi
+    }
 }
 
 # Function to change mailbox password
@@ -672,7 +675,6 @@ show_redirect_domains() {
     fi
 }
 
-
 # Function to show mailbox usage
 show_mailbox_usage() {
     local mailbox
@@ -708,7 +710,6 @@ show_mailbox_usage() {
             echo "$mailbox: Invalid quota data format. Unable to calculate usage."
             continue
            fi
-
 
            echo -e "$mailbox: Used: ${used_mb} MB, Quota: ${limit_mb} MB"
         else
