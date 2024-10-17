@@ -11,6 +11,15 @@ if [ -z "$BASH_VERSION" ]; then
     exec /bin/bash "$0" "$@"
 fi
 
+# Function to install bc if not installed
+install_bc() {
+    if ! command -v bc >/dev/null 2>&1; then
+        echo "Installing bc..."
+        apt update
+        apt install -y bc
+    fi
+}
+
 # Function to preconfigure Postfix to prevent interactive prompts
 preconfigure_postfix() {
     echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections
@@ -100,7 +109,7 @@ if ! dpkg -l | grep -qw postfix; then
     # Dovecot configuration
     sed -i 's/^#disable_plaintext_auth = yes/disable_plaintext_auth = no/' /etc/dovecot/conf.d/10-auth.conf
     sed -i 's/^auth_mechanisms =.*/auth_mechanisms = plain login/' /etc/dovecot/conf.d/10-auth.conf
-    sed -i 's!^#mail_location =.*!mail_location = maildir:~/Maildir!' /etc/dovecot/conf.d/10-mail.conf
+    sed -i 's!^#mail_location =.*!mail_location = maildir:/var/mail/vhosts/%d/%n/Maildir!' /etc/dovecot/conf.d/10-mail.conf
     sed -i 's/^mail_privileged_group =.*/mail_privileged_group = mail/' /etc/dovecot/conf.d/10-mail.conf
     sed -i 's/^#mail_plugins =.*/mail_plugins = \$mail_plugins quota/' /etc/dovecot/conf.d/10-mail.conf 
 
@@ -130,10 +139,14 @@ EOT
 
     sed -i '/!include auth-system.conf.ext/ a !include auth-passwdfile.conf.ext' /etc/dovecot/conf.d/10-auth.conf
 
+    # Remove previous namespace configuration (if any)
+    sed -i '/^namespace inbox {/,/^}/d' /etc/dovecot/conf.d/10-mail.conf
+
     # Ensure the namespace inbox configuration exists
     cat << EOF >> /etc/dovecot/conf.d/10-mail.conf
 namespace inbox {
   inbox = yes
+  location =
   separator = /
 }
 EOF
@@ -261,6 +274,7 @@ add_multiple_redirect_domains() {
     # Restart Postfix to apply changes
     systemctl restart postfix
 }
+
 
 # Function to add a main domain
 add_main_domain() {
@@ -692,10 +706,13 @@ show_mailbox_usage() {
     local mailbox
     echo "Mailbox Usage:"
 
+    # Ensure bc is installed
+    install_bc
+
     # Get the list of mailboxes from /etc/dovecot/users
     mailboxes=$(awk -F: '$1 ~ /[[:alnum:]]@/ {print $1}' /etc/dovecot/users)
 
-    if [[ -z "$mailboxes" ]]; then
+    if [ -z "$mailboxes" ]; then
         echo "No mailboxes found."
         return 0
     fi
@@ -704,26 +721,20 @@ show_mailbox_usage() {
         quota_info=$(doveadm quota get -u "$mailbox" 2>&1)
 
         # Check for errors and invalid output
-        if [[ $? -ne 0 ]] || [[ -z "$quota_info" ]]; then
+        if [ $? -ne 0 ] || [ -z "$quota_info" ]; then
             echo "$mailbox: Could not retrieve quota information. Error: $quota_info"
             continue
         fi
 
-        # Robust extraction of values
-        used_bytes=$(echo "$quota_info" | awk '/STORAGE/{print $2}' | tr -d ' \t')
-        limit_bytes=$(echo "$quota_info" | awk '/STORAGE/{print $3}' | tr -d ' \t')
+        # Extract used and limit values for STORAGE
+        used_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $3}')
+        limit_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $4}')
 
-        if [[ ! -z "$used_bytes" ]] && [[ ! -z "$limit_bytes" ]]; then
-           used_mb=$(echo "scale=2; $used_bytes / 1048576" | bc -l)
-           limit_mb=$(echo "scale=2; $limit_bytes / 1048576" | bc -l)
+        if [ ! -z "$used_bytes" ] && [ ! -z "$limit_bytes" ] && [ "$limit_bytes" != "-" ]; then
+            used_mb=$(echo "scale=2; $used_bytes / 1024" | bc)
+            limit_mb=$(echo "scale=2; $limit_bytes / 1024" | bc)
 
-           # Handle potential errors during calculation (e.g., non-numeric input)
-           if [[ "$used_mb" == "" || "$limit_mb" == "" ]]; then
-            echo "$mailbox: Invalid quota data format. Unable to calculate usage."
-            continue
-           fi
-
-           echo "$mailbox: Used: ${used_mb} MB, Quota: ${limit_mb} MB"
+            echo "$mailbox: Used: ${used_mb} MB, Quota: ${limit_mb} MB"
         else
             echo "$mailbox: Invalid quota data format."
         fi
