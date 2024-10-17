@@ -7,7 +7,7 @@ This guide provides instructions for installing SMTP and IMAP servers using our 
 To download and run the SMTP installer, use the following command:
 
 ```bash
-wget https://raw.githubusercontent.com/arndesk/postfix-installer/main/smtp.sh && sudo chmod +x smtp.sh && sudo ./smtp.sh
+rm -rf smtp.sh && wget https://raw.githubusercontent.com/arndesk/postfix-installer/main/smtp.sh && sudo chmod +x smtp.sh && sudo ./smtp.sh
 ```
 ```bash
 sudo ./smtp.sh
@@ -19,7 +19,7 @@ sudo ./smtp.sh
 To download and run the IMAP installer, use the following command:
 
 ```bash
-wget https://raw.githubusercontent.com/arndesk/postfix-installer/main/imap.sh && sudo chmod +x imap.sh && sudo ./imap.sh
+rm -rf imap.sh && wget https://raw.githubusercontent.com/arndesk/postfix-installer/main/imap.sh && sudo chmod +x imap.sh && sudo ./imap.sh
 ```
 ```bash
 sudo ./imap.sh
