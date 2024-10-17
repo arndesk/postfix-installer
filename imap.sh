@@ -327,6 +327,17 @@ add_mailbox_to_domain() {
                             mkdir -p "$maildir_path"/{cur,new,tmp}
                             chown -R vmail:vmail "/var/mail/vhosts/$domain/$username"
                             chmod -R 700 "/var/mail/vhosts/$domain/$username"
+
+                            # --- Configure the "inbox" namespace ---
+                            # Ensure this configuration exists in /etc/dovecot/conf.d/20-imap.conf or a similar file: 
+                            cat << EOF >> /etc/dovecot/conf.d/20-imap.conf
+namespace inbox {
+  separator = .
+  prefix = 
+  location = 
+}
+EOF
+
                             echo "Mailbox $email_address added with default quota of 2048M."
                         fi
                         ;;
@@ -343,6 +354,7 @@ add_mailbox_to_domain() {
         fi
     done
 }
+
 
 # Function to add a redirect domain
 add_redirect_domain() {
@@ -662,60 +674,59 @@ show_redirect_domains() {
 
 
 # Function to show mailbox usage
+# Function to show mailbox usage
 show_mailbox_usage() {
     echo "Mailbox usage:"
     mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
     for mailbox in $mailboxes; do
         # Recalculate quota for the current mailbox
-        doveadm quota recalculate -u "$mailbox" > /dev/null 2>&1 
+        doveadm quota recalculate -u "$mailbox" > /dev/null 2>&1
 
-        # Get quota and usage using doveadm
+        # Get quota and usage using doveadm (capturing stderr)
         quota_info=$(doveadm quota get -u "$mailbox" 2>&1)
-        if [ $? -ne 0 ] || [ -z "$quota_info" ]; then
-            echo "$mailbox: Could not retrieve quota information. Output: $quota_info"
+        if [[ $? -ne 0 ]]; then
+            echo "$mailbox: Could not retrieve quota information. Error:"
+            echo "$quota_info" # Print doveadm's error message
             continue
         fi
 
-        # Try extracting storage information using grep and awk
-        storage_line=$(echo "$quota_info" | grep 'STORAGE' | awk '{print $2" "$3}')
-        if [ -z "$storage_line" ]; then
-            # If previous method failed, print raw output for debugging
-            echo "$mailbox: Could not parse quota information. Raw Output:"
-            echo "$quota_info"
+        # Extract storage usage (adjust if your doveadm output differs)
+        used_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $3}')
+        limit_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $4}')
+
+        # Ensure used_bytes and limit_bytes are numeric
+        if ! [[ "$used_bytes" =~ ^[0-9]+$ ]]; then
+            echo "$mailbox: Invalid used space value: $used_bytes"
             continue
         fi
-
-        # Split storage information into used and limit
-        used_kB=$(echo "$storage_line" | awk '{print $1}')
-        limit_kB=$(echo "$storage_line" | awk '{print $2}')
-
-        # Ensure used_kB and limit_kB are numeric
-        if ! [[ "$used_kB" =~ ^[0-9]+$ ]]; then
-            echo "$mailbox: Invalid used space value: $used_kB"
-            continue
-        fi
-        if ! [[ "$limit_kB" =~ ^-?[0-9]+$ ]]; then
-            echo "$mailbox: Invalid quota limit value: $limit_kB"
+        if ! [[ "$limit_bytes" =~ ^-?[0-9]+$ ]]; then
+            echo "$mailbox: Invalid quota limit value: $limit_bytes"
             continue
         fi
 
         # Convert to MB and KB for display
-        if [ "$used_kB" -lt 1024 ]; then
-            used_display="${used_kB}KB"
+        if [ "$used_bytes" -lt 1024 ]; then
+            used_display="${used_bytes}B"
+        elif [ "$used_bytes" -lt 1048576 ]; then  # 1024 * 1024
+            used_display=$((used_bytes / 1024))"KB"
         else
-            used_MB=$((used_kB / 1024))
-            used_display="${used_MB}MB"
+            used_display=$((used_bytes / 1048576))"MB"
         fi
-        if [ "$limit_kB" -eq -1 ]; then
+
+        if [ "$limit_bytes" -eq -1 ]; then
             limit_display="Unlimited"
+        elif [ "$limit_bytes" -lt 1024 ]; then
+            limit_display="${limit_bytes}B"
+        elif [ "$limit_bytes" -lt 1048576 ]; then 
+            limit_display=$((limit_bytes / 1024))"KB"
         else
-            limit_MB=$((limit_kB / 1024))
-            limit_display="${limit_MB}MB"
+            limit_display=$((limit_bytes / 1048576))"MB"
         fi
 
         echo "$mailbox: Used ${used_display}, Quota ${limit_display}"
     done
 }
+
 
 # Main menu
 while true; do
