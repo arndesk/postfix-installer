@@ -702,50 +702,36 @@ show_redirect_domains() {
 }
 
 # Function to show mailbox usage
+# Function to show mailbox usage
 show_mailbox_usage() {
     echo "Mailbox Usage:"
 
-    # Ensure bc is installed
-    install_bc
-
     # Get the list of mailboxes from /etc/dovecot/users
-    mailboxes=$(awk -F: '$1 ~ /[[:alnum:]]@/ {print $1}' /etc/dovecot/users)
+    mailboxes=$(awk -F: '{print $1}' /etc/dovecot/users)
 
     if [ -z "$mailboxes" ]; then
         echo "No mailboxes found."
-        return 0
+        return
     fi
 
     for mailbox in $mailboxes; do
         # Get quota information
-        quota_info=$(doveadm quota get -u "$mailbox" 2>&1)
-
-        if [ $? -ne 0 ]; then
-            echo "$mailbox: Error retrieving quota information."
-            continue
-        fi
+        quota_info=$(doveadm quota get -u "$mailbox" 2>/dev/null)
 
         # Extract used and limit values
         used_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $3}')
         limit_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $4}')
 
-        if [ -z "$used_bytes" ] || [ -z "$limit_bytes" ] || [ "$limit_bytes" = "-" ]; then
-            echo "$mailbox: No quota set or invalid quota information."
-            continue
-        fi
-
         # Convert bytes to MB
-        used_mb=$(echo "scale=2; $used_bytes / 1048576" | bc)
-        limit_mb=$(echo "scale=2; $limit_bytes / 1048576" | bc)
+        used_mb=$(awk "BEGIN {printf \"%.2f\", $used_bytes/1048576}")
 
-        # Calculate usage percentage
-        if [ "$limit_bytes" -ne 0 ]; then
-            usage_percent=$(echo "scale=2; ($used_bytes / $limit_bytes) * 100" | bc)
+        if [ "$limit_bytes" = "0" ] || [ "$limit_bytes" = "-" ]; then
+            echo "$mailbox: Used: ${used_mb} MB, Quota: Unlimited"
         else
-            usage_percent="N/A"
+            limit_mb=$(awk "BEGIN {printf \"%.2f\", $limit_bytes/1048576}")
+            usage_percent=$(awk "BEGIN {printf \"%.2f\", ($used_bytes/$limit_bytes)*100}")
+            echo "$mailbox: Used: ${used_mb} MB, Quota: ${limit_mb} MB, Usage: ${usage_percent}%"
         fi
-
-        echo "$mailbox: Used: ${used_mb} MB, Quota: ${limit_mb} MB, Usage: ${usage_percent}%"
     done
 }
 
