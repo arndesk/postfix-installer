@@ -75,7 +75,7 @@ if ! dpkg -l | grep -qw postfix; then
     apt update
 
     # Install necessary packages without prompts
-    DEBIAN_FRONTEND=noninteractive apt install -y postfix dovecot-imapd
+    DEBIAN_FRONTEND=noninteractive apt install -y postfix dovecot-imapd dovecot-pop3d
 
     # Initialize files if they don't exist
     touch /etc/postfix/virtual
@@ -99,33 +99,36 @@ if ! dpkg -l | grep -qw postfix; then
     postmap /etc/postfix/vmailbox
 
     # Dovecot configuration
-    echo "auth_mechanisms = plain login" >> /etc/dovecot/conf.d/10-auth.conf
-    echo "disable_plaintext_auth = no" >> /etc/dovecot/conf.d/10-auth.conf
-    echo "mail_location = maildir:/var/mail/vhosts/%d/%n" >> /etc/dovecot/conf.d/10-mail.conf
-    echo "mail_plugins = \$mail_plugins quota" >> /etc/dovecot/conf.d/10-mail.conf
+    sed -i 's/^#disable_plaintext_auth = yes/disable_plaintext_auth = no/' /etc/dovecot/conf.d/10-auth.conf
+    sed -i 's/^auth_mechanisms =.*/auth_mechanisms = plain login/' /etc/dovecot/conf.d/10-auth.conf
+    sed -i 's!^#mail_location =.*!mail_location = maildir:/var/mail/vhosts/%d/%n!' /etc/dovecot/conf.d/10-mail.conf
+    sed -i 's/^mail_privileged_group =.*/mail_privileged_group = mail/' /etc/dovecot/conf.d/10-mail.conf
+    sed -i 's/^#mail_plugins =.*/mail_plugins = quota/' /etc/dovecot/conf.d/10-mail.conf
 
-    echo "protocol imap {
-    mail_plugins = \$mail_plugins quota imap_quota
-}" >> /etc/dovecot/conf.d/20-imap.conf
+    # Protocols configuration
+    sed -i '/^protocol imap {/,/^}/ s/^  #mail_plugins =.*/  mail_plugins = \$mail_plugins imap_quota/' /etc/dovecot/conf.d/20-imap.conf
 
+    # Quota configuration
     cat <<EOT > /etc/dovecot/conf.d/90-quota.conf
 plugin {
-    quota = maildir:User quota
-    quota_rule = *:storage=2048M
+  quota = maildir:User quota
 }
 EOT
 
-    echo "userdb {
-    driver = passwd-file
-    args = username_format=%u /etc/dovecot/users
-}" >> /etc/dovecot/conf.d/auth-passwdfile.conf.ext
+    # Authentication configuration
+    cat <<EOT > /etc/dovecot/conf.d/auth-passwdfile.conf.ext
+passdb {
+  driver = passwd-file
+  args = username_format=%u /etc/dovecot/users
+}
 
-    echo "passdb {
-    driver = passwd-file
-    args = username_format=%u /etc/dovecot/users
-}" >> /etc/dovecot/conf.d/auth-passwdfile.conf.ext
+userdb {
+  driver = passwd-file
+  args = username_format=%u /etc/dovecot/users
+}
+EOT
 
-    echo "!include auth-passwdfile.conf.ext" >> /etc/dovecot/conf.d/10-auth.conf
+    sed -i '/!include auth-system.conf.ext/ a !include auth-passwdfile.conf.ext' /etc/dovecot/conf.d/10-auth.conf
 
     # Set permissions for mail directories
     groupadd -g 5000 vmail
