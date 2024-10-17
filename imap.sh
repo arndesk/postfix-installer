@@ -675,57 +675,47 @@ show_redirect_domains() {
 
 # Function to show mailbox usage
 show_mailbox_usage() {
-    echo "Mailbox usage:"
-    mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
+    local mailbox
+    echo "Mailbox Usage:"
+
+    # Get the list of mailboxes from /etc/dovecot/users
+    mailboxes=$(awk -F: '$1 ~ /[[:alnum:]]@/ {print $1}' /etc/dovecot/users)
+
+    if [[ -z "$mailboxes" ]]; then
+        echo "No mailboxes found."
+        return 0
+    fi
+
     for mailbox in $mailboxes; do
-        # Recalculate quota for the current mailbox
-        doveadm quota recalculate -u "$mailbox" > /dev/null 2>&1
-
-        # Get quota and usage using doveadm (capturing stderr)
         quota_info=$(doveadm quota get -u "$mailbox" 2>&1)
-        if [[ $? -ne 0 ]]; then
-            echo "$mailbox: Could not retrieve quota information. Error:"
-            echo "$quota_info" # Print doveadm's error message
+
+        # Check for errors and invalid output
+        if [[ $? -ne 0 ]] || [[ -z "$quota_info" ]]; then
+            echo -e "$mailbox: Could not retrieve quota information. Error: $quota_info"
             continue
         fi
 
-        # Extract storage usage and limit correctly
-        used_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $2}')
-        limit_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $3}')
+        # Robust extraction of values
+        used_bytes=$(echo "$quota_info" | awk '/STORAGE/{print $2}' | tr -d ' \t')
+        limit_bytes=$(echo "$quota_info" | awk '/STORAGE/{print $3}' | tr -d ' \t')
 
-        # Ensure used_bytes and limit_bytes are numeric
-        if ! [[ "$used_bytes" =~ ^[0-9]+$ ]]; then
-            echo "$mailbox: Invalid used space value: $used_bytes"
-            continue
-        fi
-        if ! [[ "$limit_bytes" =~ ^-?[0-9]+$ ]]; then
-            echo "$mailbox: Invalid quota limit value: $limit_bytes"
-            continue
-        fi
+        if [[ ! -z "$used_bytes" ]] && [[ ! -z "$limit_bytes" ]]; then
+           used_mb=$(echo "scale=2; $used_bytes / 1048576" | bc -l)
+           limit_mb=$(echo "scale=2; $limit_bytes / 1048576" | bc -l)
 
-        # Convert to MB and KB for display
-        if [ "$used_bytes" -lt 1024 ]; then
-            used_display="${used_bytes}B"
-        elif [ "$used_bytes" -lt 1048576 ]; then  # 1024 * 1024
-            used_display=$((used_bytes / 1024))"KB"
+           # Handle potential errors during calculation (e.g., non-numeric input)
+           if [[ "$used_mb" == "" || "$limit_mb" == "" ]]; then
+            echo "$mailbox: Invalid quota data format. Unable to calculate usage."
+            continue
+           fi
+
+
+           echo -e "$mailbox: Used: ${used_mb} MB, Quota: ${limit_mb} MB"
         else
-            used_display=$((used_bytes / 1048576))"MB"
+            echo "$mailbox: Invalid quota data format."
         fi
-
-        if [ "$limit_bytes" -eq -1 ]; then
-            limit_display="Unlimited"
-        elif [ "$limit_bytes" -lt 1024 ]; then
-            limit_display="${limit_bytes}B"
-        elif [ "$limit_bytes" -lt 1048576 ]; then 
-            limit_display=$((limit_bytes / 1024))"KB"
-        else
-            limit_display=$((limit_bytes / 1048576))"MB"
-        fi
-
-        echo "$mailbox: Used ${used_display}, Quota ${limit_display}"
     done
 }
-
 
 # Main menu
 while true; do
