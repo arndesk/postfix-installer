@@ -660,6 +660,7 @@ show_redirect_domains() {
     fi
 }
 
+
 # Function to show mailbox usage
 show_mailbox_usage() {
     echo "Mailbox usage:"
@@ -669,28 +670,32 @@ show_mailbox_usage() {
         doveadm quota recalculate -u "$mailbox" > /dev/null 2>&1 
 
         # Get quota and usage using doveadm
-        quota_info=$(doveadm quota get -u "$mailbox" 2>/dev/null)
+        quota_info=$(doveadm quota get -u "$mailbox" 2>&1)
         if [ $? -ne 0 ] || [ -z "$quota_info" ]; then
-            echo "$mailbox: Could not retrieve quota information."
+            echo "$mailbox: Could not retrieve quota information. Output: $quota_info"
             continue
         fi
 
-        # Parse the output (assuming the output format is consistent)
-        storage_line=$(echo "$quota_info" | grep -E '^ *STORAGE')
+        # Try extracting storage information using grep and awk
+        storage_line=$(echo "$quota_info" | grep 'STORAGE' | awk '{print $2" "$3}')
         if [ -z "$storage_line" ]; then
-            echo "$mailbox: Could not parse quota information."
+            # If previous method failed, print raw output for debugging
+            echo "$mailbox: Could not parse quota information. Raw Output:"
+            echo "$quota_info"
             continue
         fi
-        used_kB=$(echo "$storage_line" | awk '{print $3}')
-        limit_kB=$(echo "$storage_line" | awk '{print $4}')
-        
+
+        # Split storage information into used and limit
+        used_kB=$(echo "$storage_line" | awk '{print $1}')
+        limit_kB=$(echo "$storage_line" | awk '{print $2}')
+
         # Ensure used_kB and limit_kB are numeric
         if ! [[ "$used_kB" =~ ^[0-9]+$ ]]; then
-            echo "$mailbox: Invalid used space value."
+            echo "$mailbox: Invalid used space value: $used_kB"
             continue
         fi
         if ! [[ "$limit_kB" =~ ^-?[0-9]+$ ]]; then
-            echo "$mailbox: Invalid quota limit value."
+            echo "$mailbox: Invalid quota limit value: $limit_kB"
             continue
         fi
 
