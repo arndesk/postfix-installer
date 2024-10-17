@@ -103,7 +103,7 @@ if ! dpkg -l | grep -qw postfix; then
     sed -i 's/^auth_mechanisms =.*/auth_mechanisms = plain login/' /etc/dovecot/conf.d/10-auth.conf
     sed -i 's!^#mail_location =.*!mail_location = maildir:~/Maildir!' /etc/dovecot/conf.d/10-mail.conf
     sed -i 's/^mail_privileged_group =.*/mail_privileged_group = mail/' /etc/dovecot/conf.d/10-mail.conf
-    sed -i 's/^#mail_plugins =.*/mail_plugins = quota/' /etc/dovecot/conf.d/10-mail.conf
+    sed -i 's/^#mail_plugins =.*/mail_plugins = \$mail_plugins quota/' /etc/dovecot/conf.d/10-mail.conf 
 
     # Protocols configuration
     sed -i '/^protocol imap {/,/^}/ s/^  #mail_plugins =.*/  mail_plugins = \$mail_plugins imap_quota/' /etc/dovecot/conf.d/20-imap.conf
@@ -168,6 +168,7 @@ else
 
     echo "Postfix is already installed. Updated configurations."
 fi
+
 
 # Function to add multiple redirect domains
 add_multiple_redirect_domains() {
@@ -664,13 +665,17 @@ show_mailbox_usage() {
     echo "Mailbox usage:"
     mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
     for mailbox in $mailboxes; do
+        # Recalculate quota for the current mailbox
+        doveadm quota recalculate -u "$mailbox" > /dev/null 2>&1 
+
         # Get quota and usage using doveadm
         quota_info=$(doveadm quota get -u "$mailbox" 2>/dev/null)
         if [ $? -ne 0 ] || [ -z "$quota_info" ]; then
             echo "$mailbox: Could not retrieve quota information."
             continue
         fi
-        # Parse the output
+
+        # Parse the output (assuming the output format is consistent)
         storage_line=$(echo "$quota_info" | grep -E '^ *STORAGE')
         if [ -z "$storage_line" ]; then
             echo "$mailbox: Could not parse quota information."
@@ -678,6 +683,7 @@ show_mailbox_usage() {
         fi
         used_kB=$(echo "$storage_line" | awk '{print $3}')
         limit_kB=$(echo "$storage_line" | awk '{print $4}')
+        
         # Ensure used_kB and limit_kB are numeric
         if ! [[ "$used_kB" =~ ^[0-9]+$ ]]; then
             echo "$mailbox: Invalid used space value."
@@ -687,7 +693,8 @@ show_mailbox_usage() {
             echo "$mailbox: Invalid quota limit value."
             continue
         fi
-        # Convert to MB and KB
+
+        # Convert to MB and KB for display
         if [ "$used_kB" -lt 1024 ]; then
             used_display="${used_kB}KB"
         else
@@ -700,6 +707,7 @@ show_mailbox_usage() {
             limit_MB=$((limit_kB / 1024))
             limit_display="${limit_MB}MB"
         fi
+
         echo "$mailbox: Used ${used_display}, Quota ${limit_display}"
     done
 }
