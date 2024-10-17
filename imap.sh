@@ -674,7 +674,6 @@ show_redirect_domains() {
 
 
 # Function to show mailbox usage
-# Function to show mailbox usage
 show_mailbox_usage() {
     echo "Mailbox usage:"
     mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
@@ -690,9 +689,9 @@ show_mailbox_usage() {
             continue
         fi
 
-        # Extract storage usage (adjust if your doveadm output differs)
-        used_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $3}')
-        limit_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $4}')
+        # Extract storage usage and limit correctly
+        used_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $2}')
+        limit_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $3}')
 
         # Ensure used_bytes and limit_bytes are numeric
         if ! [[ "$used_bytes" =~ ^[0-9]+$ ]]; then
