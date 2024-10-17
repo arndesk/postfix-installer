@@ -101,7 +101,7 @@ if ! dpkg -l | grep -qw postfix; then
     # Dovecot configuration
     sed -i 's/^#disable_plaintext_auth = yes/disable_plaintext_auth = no/' /etc/dovecot/conf.d/10-auth.conf
     sed -i 's/^auth_mechanisms =.*/auth_mechanisms = plain login/' /etc/dovecot/conf.d/10-auth.conf
-    sed -i 's!^#mail_location =.*!mail_location = maildir:/var/mail/vhosts/%d/%n!' /etc/dovecot/conf.d/10-mail.conf
+    sed -i 's!^#mail_location =.*!mail_location = maildir:~/Maildir!' /etc/dovecot/conf.d/10-mail.conf
     sed -i 's/^mail_privileged_group =.*/mail_privileged_group = mail/' /etc/dovecot/conf.d/10-mail.conf
     sed -i 's/^#mail_plugins =.*/mail_plugins = quota/' /etc/dovecot/conf.d/10-mail.conf
 
@@ -125,19 +125,14 @@ passdb {
 userdb {
   driver = passwd-file
   args = username_format=%u /etc/dovecot/users
+  default_fields = uid=5000 gid=5000 home=/var/mail/vhosts/%d/%n
 }
 EOT
 
     sed -i '/!include auth-system.conf.ext/ a !include auth-passwdfile.conf.ext' /etc/dovecot/conf.d/10-auth.conf
 
-    # Define namespace in Dovecot
-    cat <<EOT >> /etc/dovecot/conf.d/10-mail.conf
-
-namespace inbox {
-  inbox = yes
-  separator = /
-}
-EOT
+    # Remove previous namespace configuration (if any)
+    sed -i '/^namespace inbox {/,/^}/d' /etc/dovecot/conf.d/10-mail.conf
 
     # Set permissions for mail directories
     groupadd -g 5000 vmail
@@ -260,7 +255,7 @@ add_multiple_redirect_domains() {
     systemctl restart postfix
 }
 
-# Function to add a main domain and mailboxes
+# Function to add a main domain
 add_main_domain() {
     read -p "Enter the main domain you want to add: " main_domain
 
@@ -292,46 +287,60 @@ add_main_domain() {
     mkdir -p /var/mail/vhosts/"$main_domain"
     chown -R vmail:vmail /var/mail/vhosts/"$main_domain"
 
-    while true; do
-        read -p "Do you want to add a mailbox to $main_domain? (y/n): " yn
-        case $yn in
-            [Yy]* )
-                read -p "Enter the email address (e.g., user@$main_domain): " email_address
-                username=$(echo "$email_address" | cut -d'@' -f1)
-                domain=$(echo "$email_address" | cut -d'@' -f2)
-                if [ "$domain" != "$main_domain" ]; then
-                    echo "The domain part of the email address does not match the main domain."
-                    continue
-                fi
-                read -s -p "Enter the password for $email_address: " password
-                echo
-                # Hash the password
-                hashed_password=$(doveadm pw -s SHA512-CRYPT -u "$email_address" -p "$password")
-                # Check if user already exists
-                if grep -q "^$email_address:" /etc/dovecot/users; then
-                    echo "User $email_address already exists."
-                else
-                    # Add to Dovecot user database with default quota
-                    echo "$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$main_domain/$username::userdb_quota_rule=*:storage=2048M" >> /etc/dovecot/users
-                    # Add to Postfix vmailbox file
-                    echo "$email_address    $main_domain/$username/" >> /etc/postfix/vmailbox
-                    postmap /etc/postfix/vmailbox
-                    # Create Maildir structure
-                    maildir_path="/var/mail/vhosts/$main_domain/$username"
-                    mkdir -p "$maildir_path"/{cur,new,tmp}
-                    chown -R vmail:vmail "$maildir_path"
-                    chmod -R 700 "$maildir_path"
-                    echo "Mailbox $email_address added with default quota of 2048M."
-                fi
-                ;;
-            [Nn]* ) break;;
-            * ) echo "Please answer yes or no.";;
-        esac
-    done
+    echo "Main domain $main_domain added."
+}
 
-    # Restart Postfix and Dovecot to apply changes
-    systemctl restart postfix
-    systemctl restart dovecot
+# Function to add mailboxes to an existing domain
+add_mailbox_to_domain() {
+    # List existing main domains
+    echo "Existing main domains:"
+    main_domains=$(postconf -h virtual_mailbox_domains | tr -d ' ' | tr ',' '\n')
+    select domain in $main_domains; do
+        if [ -n "$domain" ]; then
+            while true; do
+                read -p "Do you want to add a mailbox to $domain? (y/n): " yn
+                case $yn in
+                    [Yy]* )
+                        read -p "Enter the email address (e.g., user@$domain): " email_address
+                        username=$(echo "$email_address" | cut -d'@' -f1)
+                        email_domain=$(echo "$email_address" | cut -d'@' -f2)
+                        if [ "$email_domain" != "$domain" ]; then
+                            echo "The domain part of the email address does not match the selected domain."
+                            continue
+                        fi
+                        read -s -p "Enter the password for $email_address: " password
+                        echo
+                        # Hash the password
+                        hashed_password=$(doveadm pw -s SHA512-CRYPT -u "$email_address" -p "$password")
+                        # Check if user already exists
+                        if grep -q "^$email_address:" /etc/dovecot/users; then
+                            echo "User $email_address already exists."
+                        else
+                            # Add to Dovecot user database with default quota
+                            echo "$email_address:$hashed_password:5000:5000::/var/mail/vhosts/$domain/$username::userdb_quota_rule=*:storage=2048M" >> /etc/dovecot/users
+                            # Add to Postfix vmailbox file
+                            echo "$email_address    $domain/$username/" >> /etc/postfix/vmailbox
+                            postmap /etc/postfix/vmailbox
+                            # Create Maildir structure
+                            maildir_path="/var/mail/vhosts/$domain/$username/Maildir"
+                            mkdir -p "$maildir_path"/{cur,new,tmp}
+                            chown -R vmail:vmail "/var/mail/vhosts/$domain/$username"
+                            chmod -R 700 "/var/mail/vhosts/$domain/$username"
+                            echo "Mailbox $email_address added with default quota of 2048M."
+                        fi
+                        ;;
+                    [Nn]* ) break;;
+                    * ) echo "Please answer yes or no.";;
+                esac
+            done
+            # Restart Postfix and Dovecot to apply changes
+            systemctl restart postfix
+            systemctl restart dovecot
+            break
+        else
+            echo "Invalid selection."
+        fi
+    done
 }
 
 # Function to add a redirect domain
@@ -530,7 +539,7 @@ edit_delete_redirect_domain() {
         else
             echo "Redirect domain $redirect_domain does not exist."
         fi
-    fi
+    }
 }
 
 # Function to change mailbox password
@@ -618,7 +627,7 @@ edit_hostname() {
 # Function to show all main domains and mailboxes
 show_main_domains_and_mailboxes() {
     echo "Main domains and their mailboxes:"
-    domains=$(awk -F':' '{print $1}' /etc/dovecot/users | cut -d'@' -f2 | sort | uniq)
+    domains=$(postconf -h virtual_mailbox_domains | tr -d ' ' | tr ',' '\n')
     for domain in $domains; do
         echo "Domain: $domain"
         mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users | grep "@$domain")
@@ -656,61 +665,76 @@ show_mailbox_usage() {
     mailboxes=$(awk -F':' '{print $1}' /etc/dovecot/users)
     for mailbox in $mailboxes; do
         # Get quota and usage using doveadm
-        quota_info=$(doveadm quota get -u "$mailbox")
-        if [ -n "$quota_info" ]; then
-            # Parse the output
-            storage_line=$(echo "$quota_info" | grep 'STORAGE')
-            used_kB=$(echo "$storage_line" | awk '{print $3}')
-            limit_kB=$(echo "$storage_line" | awk '{print $4}')
-            # Convert to MB and KB
-            if [ "$used_kB" -lt 1024 ]; then
-                used_display="${used_kB}KB"
-            else
-                used_MB=$((used_kB / 1024))
-                used_display="${used_MB}MB"
-            fi
-            if [ "$limit_kB" -eq -1 ]; then
-                limit_display="Unlimited"
-            else
-                limit_MB=$((limit_kB / 1024))
-                limit_display="${limit_MB}MB"
-            fi
-            echo "$mailbox: Used ${used_display}, Quota ${limit_display}"
-        else
+        quota_info=$(doveadm quota get -u "$mailbox" 2>/dev/null)
+        if [ $? -ne 0 ] || [ -z "$quota_info" ]; then
             echo "$mailbox: Could not retrieve quota information."
+            continue
         fi
+        # Parse the output
+        storage_line=$(echo "$quota_info" | grep -E '^ *STORAGE')
+        if [ -z "$storage_line" ]; then
+            echo "$mailbox: Could not parse quota information."
+            continue
+        fi
+        used_kB=$(echo "$storage_line" | awk '{print $3}')
+        limit_kB=$(echo "$storage_line" | awk '{print $4}')
+        # Ensure used_kB and limit_kB are numeric
+        if ! [[ "$used_kB" =~ ^[0-9]+$ ]]; then
+            echo "$mailbox: Invalid used space value."
+            continue
+        fi
+        if ! [[ "$limit_kB" =~ ^-?[0-9]+$ ]]; then
+            echo "$mailbox: Invalid quota limit value."
+            continue
+        fi
+        # Convert to MB and KB
+        if [ "$used_kB" -lt 1024 ]; then
+            used_display="${used_kB}KB"
+        else
+            used_MB=$((used_kB / 1024))
+            used_display="${used_MB}MB"
+        fi
+        if [ "$limit_kB" -eq -1 ]; then
+            limit_display="Unlimited"
+        else
+            limit_MB=$((limit_kB / 1024))
+            limit_display="${limit_MB}MB"
+        fi
+        echo "$mailbox: Used ${used_display}, Quota ${limit_display}"
     done
 }
 
 # Main menu
 while true; do
     echo "Select an option:"
-    echo "1) Add a main domain and mailboxes"
-    echo "2) Add a redirect domain"
-    echo "3) Add multiple redirect domains"
-    echo "4) Edit/Delete a mailbox"
-    echo "5) Edit/Delete a redirect domain"
-    echo "6) Change mailbox password"
-    echo "7) Change mailbox quota"
-    echo "8) Edit hostname"
-    echo "9) Show main domains and mailboxes"
-    echo "10) Show redirect domains"
-    echo "11) Show mailbox usage"
-    echo "12) Exit"
-    read -p "Enter your choice [1-12]: " choice
+    echo "1) Add a main domain"
+    echo "2) Add mailboxes to an existing domain"
+    echo "3) Add a redirect domain"
+    echo "4) Add multiple redirect domains"
+    echo "5) Edit/Delete a mailbox"
+    echo "6) Edit/Delete a redirect domain"
+    echo "7) Change mailbox password"
+    echo "8) Change mailbox quota"
+    echo "9) Edit hostname"
+    echo "10) Show main domains and mailboxes"
+    echo "11) Show redirect domains"
+    echo "12) Show mailbox usage"
+    echo "13) Exit"
+    read -p "Enter your choice [1-13]: " choice
     case $choice in
         1) add_main_domain;;
-        2) add_redirect_domain;;
-        3) add_multiple_redirect_domains;;
-        4) edit_delete_mailbox;;
-        5) edit_delete_redirect_domain;;
-        6) change_mailbox_password;;
-        7) change_mailbox_quota;;
-        8) edit_hostname;;
-        9) show_main_domains_and_mailboxes;;
-        10) show_redirect_domains;;
-        11) show_mailbox_usage;;
-        12) break;;
+        2) add_mailbox_to_domain;;
+        3) add_redirect_domain;;
+        4) add_multiple_redirect_domains;;
+        5) edit_delete_mailbox;;
+        6) edit_delete_redirect_domain;;
+        7) change_mailbox_password;;
+        8) change_mailbox_quota;;
+        9) edit_hostname;;
+        10) show_main_domains_and_mailboxes;;
+        11) show_redirect_domains;;
+        12) show_mailbox_usage;;
+        13) break;;
         *) echo "Invalid option.";;
     esac
 done
