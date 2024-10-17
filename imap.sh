@@ -703,7 +703,6 @@ show_redirect_domains() {
 
 # Function to show mailbox usage
 show_mailbox_usage() {
-    local mailbox
     echo "Mailbox Usage:"
 
     # Ensure bc is installed
@@ -718,26 +717,35 @@ show_mailbox_usage() {
     fi
 
     for mailbox in $mailboxes; do
+        # Get quota information
         quota_info=$(doveadm quota get -u "$mailbox" 2>&1)
 
-        # Check for errors and invalid output
-        if [ $? -ne 0 ] || [ -z "$quota_info" ]; then
-            echo "$mailbox: Could not retrieve quota information. Error: $quota_info"
+        if [ $? -ne 0 ]; then
+            echo "$mailbox: Error retrieving quota information."
             continue
         fi
 
-        # Extract used and limit values for STORAGE
+        # Extract used and limit values
         used_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $3}')
         limit_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $4}')
 
-        if [ ! -z "$used_bytes" ] && [ ! -z "$limit_bytes" ] && [ "$limit_bytes" != "-" ]; then
-            used_mb=$(echo "scale=2; $used_bytes / 1024" | bc)
-            limit_mb=$(echo "scale=2; $limit_bytes / 1024" | bc)
-
-            echo "$mailbox: Used: ${used_mb} MB, Quota: ${limit_mb} MB"
-        else
-            echo "$mailbox: Invalid quota data format."
+        if [ -z "$used_bytes" ] || [ -z "$limit_bytes" ] || [ "$limit_bytes" = "-" ]; then
+            echo "$mailbox: No quota set or invalid quota information."
+            continue
         fi
+
+        # Convert bytes to MB
+        used_mb=$(echo "scale=2; $used_bytes / 1048576" | bc)
+        limit_mb=$(echo "scale=2; $limit_bytes / 1048576" | bc)
+
+        # Calculate usage percentage
+        if [ "$limit_bytes" -ne 0 ]; then
+            usage_percent=$(echo "scale=2; ($used_bytes / $limit_bytes) * 100" | bc)
+        else
+            usage_percent="N/A"
+        fi
+
+        echo "$mailbox: Used: ${used_mb} MB, Quota: ${limit_mb} MB, Usage: ${usage_percent}%"
     done
 }
 
