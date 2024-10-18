@@ -702,38 +702,83 @@ show_redirect_domains() {
 }
 
 # Function to show mailbox usage
-# Function to show mailbox usage
 show_mailbox_usage() {
     echo "Mailbox Usage:"
 
+    # Ensure bc is installed
+    install_bc
+
     # Get the list of mailboxes from /etc/dovecot/users
-    mailboxes=$(awk -F: '{print $1}' /etc/dovecot/users)
+    mailboxes=$(awk -F: '$1 ~ /[[:alnum:]]@/ {print $1}' /etc/dovecot/users)
 
     if [ -z "$mailboxes" ]; then
         echo "No mailboxes found."
-        return
+        return 0
     fi
 
     for mailbox in $mailboxes; do
-        # Get quota information
-        quota_info=$(doveadm quota get -u "$mailbox" 2>/dev/null)
+        # Get quota info
+        quota_info=$(doveadm quota get -u "$mailbox" 2>&1)
 
-        # Extract used and limit values
-        used_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $3}')
-        limit_bytes=$(echo "$quota_info" | awk '/STORAGE/ {print $4}')
+        # Debug: Uncomment the next line to see the raw quota_info
+        # echo "Quota info for $mailbox: $quota_info"
 
-        # Convert bytes to MB
-        used_mb=$(awk "BEGIN {printf \"%.2f\", $used_bytes/1048576}")
-
-        if [ "$limit_bytes" = "0" ] || [ "$limit_bytes" = "-" ]; then
-            echo "$mailbox: Used: ${used_mb} MB, Quota: Unlimited"
-        else
-            limit_mb=$(awk "BEGIN {printf \"%.2f\", $limit_bytes/1048576}")
-            usage_percent=$(awk "BEGIN {printf \"%.2f\", ($used_bytes/$limit_bytes)*100}")
-            echo "$mailbox: Used: ${used_mb} MB, Quota: ${limit_mb} MB, Usage: ${usage_percent}%"
+        # Check for errors or empty output
+        if [ $? -ne 0 ] || [ -z "$quota_info" ]; then
+            echo "$mailbox: Could not retrieve quota information. Error: $quota_info"
+            continue
         fi
+
+        # Initialize variables
+        used_storage=0
+        limit_storage=0
+        used_messages=0
+        limit_messages=0
+
+        # Parse each line of quota_info
+        while IFS= read -r line; do
+            resource=$(echo "$line" | awk '{print $1}')
+            used=$(echo "$line" | awk '{print $2}')
+            limit=$(echo "$line" | awk '{print $3}')
+
+            case "$resource" in
+                STORAGE)
+                    used_storage=$used
+                    limit_storage=$limit
+                    ;;
+                MESSAGE)
+                    used_messages=$used
+                    limit_messages=$limit
+                    ;;
+                *)
+                    ;;
+            esac
+        done <<< "$quota_info"
+
+        # Display STORAGE quota
+        if [ "$limit_storage" == "-" ] || [ -z "$limit_storage" ]; then
+            echo "$mailbox: STORAGE Quota not set."
+        elif [[ "$used_storage" =~ ^[0-9]+$ ]] && [[ "$limit_storage" =~ ^[0-9]+$ ]]; then
+            used_mb=$(echo "scale=2; $used_storage / 1048576" | bc)
+            limit_mb=$(echo "scale=2; $limit_storage / 1048576" | bc)
+            echo "$mailbox: STORAGE - Used: ${used_mb} MB, Quota: ${limit_mb} MB"
+        else
+            echo "$mailbox: STORAGE - Invalid quota data format."
+        fi
+
+        # Display MESSAGE quota
+        if [ "$limit_messages" == "-" ] || [ -z "$limit_messages" ]; then
+            echo "$mailbox: MESSAGE Quota not set."
+        elif [[ "$used_messages" =~ ^[0-9]+$ ]] && [[ "$limit_messages" =~ ^[0-9]+$ ]]; then
+            echo "$mailbox: MESSAGE - Used: $used_messages, Quota: $limit_messages"
+        else
+            echo "$mailbox: MESSAGE - Invalid quota data format."
+        fi
+
     done
 }
+
+
 
 # Main menu
 while true; do
